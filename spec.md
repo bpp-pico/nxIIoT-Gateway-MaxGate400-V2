@@ -12,7 +12,10 @@ Decisions so far (user, 2026-09-25):
 - **The wire contract may change.** The MQTT/HTTP payload, ack format and `sequence_id` scheme in [Server_Design_Spec.md](Server_Design_Spec.md) are no longer fixed. Whatever V2 picks has to be rewritten into that doc for the backend team.
 - **Drop data priority.** No `CRITICAL`/`HIGH`/`NORMAL`/`LOW` tiers, and no "CRITICAL is never evicted" rule. This affects `data_queue.priority`, `datapoint.priority` and the UI field, priority-ordered `FetchBatch`, per-tier `EvictOldestNonCritical`, `migrations/0007`'s index, and `priority` in the wire entry.
 
-Still open, needed before design: how much data loss is acceptable and how long an outage the buffer must cover; whether every reading must be stored or only changes (deadband / report-by-exception) or one row per poll cycle.
+- **Outage coverage: as long as possible.** The buffer should hold as many hours/days of undelivered data as `/userdata` (1.6 GB) allows, so storage per reading must be minimised and the cap should be in bytes, not rows (`max_rows` bounded rows, not file size — see MEMORY.md 2026-09-11).
+- **Store only changed values** (report-by-exception) instead of every poll result.
+
+Still open: which storage design (options proposed in chat 2026-09-25, not chosen yet); deadband per datapoint; heartbeat/integrity interval; eviction when full (assumed: drop oldest). Tolerated loss on power failure was not stated — assumed ≤ ~1s of readings.
 No code changed yet.
 
 ## Architecture
