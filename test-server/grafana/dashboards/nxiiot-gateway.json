@@ -131,7 +131,7 @@
         "w": 8,
         "h": 4
       },
-      "description": "Chunks the gateway evicted before they could be sent (seq gaps detected by server-sim).",
+      "description": "Chunks the gateway evicted before they could be sent (seq gaps detected by server-demo).",
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -253,7 +253,7 @@
         "w": 24,
         "h": 10
       },
-      "description": "Mean per interval. Series are labelled with the name and unit set on the server-sim Datapoints page.",
+      "description": "Mean per interval. Series are labelled with the name and unit set on the server-demo Datapoints page.",
       "fieldConfig": {
         "defaults": {
           "custom": {

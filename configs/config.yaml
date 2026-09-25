@@ -16,7 +16,7 @@ queue:
   maintenance_interval_seconds: 30
 
 forwarder:
-  transport: "http" # "http" (dev/test, cmd/server-sim) or "mqtt"
+  transport: "http" # "http" (dev/test, cmd/server-demo) or "mqtt"
   server_url: "http://localhost:9000/ingest"
   max_readings_per_message: 2000
   poll_interval_ms: 1000

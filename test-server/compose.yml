@@ -1,4 +1,4 @@
-# Local V2 test server: EMQX (MQTT broker) + server-sim (V2 wire contract,
+# Local V2 test server: EMQX (MQTT broker) + server-demo (V2 wire contract,
 # dedupe + ack, status/config page) + InfluxDB 2 (storage) + Grafana
 # (dashboard). Dev/test only — see README.md here.
 #
@@ -44,10 +44,10 @@ services:
       retries: 12
     restart: unless-stopped
 
-  server-sim:
+  server-demo:
     build:
       context: ..
-      dockerfile: Dockerfile.server-sim
+      dockerfile: Dockerfile.server-demo
     environment:
       MQTT_BROKER_URL: tcp://emqx:1883
       INFLUX_URL: http://influxdb:8086

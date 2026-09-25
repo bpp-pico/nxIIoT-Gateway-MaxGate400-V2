@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nxIIoT Test Server</title>
+<title>nxIIoT Server Demo</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #fff; --text: #1c2330; --muted: #667085; --line: #e3e6eb;
@@ -58,7 +58,7 @@
 </head>
 <body>
 <header>
-  <h1>nxIIoT Test Server</h1>
+  <h1>nxIIoT Server Demo</h1>
   <span id="conn" class="chip">…</span>
   <div class="links"><a id="grafana" href="#" target="_blank" rel="noopener">Grafana</a><a id="influx" href="#" target="_blank" rel="noopener">InfluxDB</a><a id="emqx" href="#" target="_blank" rel="noopener">EMQX</a></div>
 </header>
@@ -83,7 +83,7 @@
       <thead><tr><th>Detected</th><th>Gateway</th><th>Stream</th><th>Missing seq</th><th class="num">Chunks</th></tr></thead>
       <tbody id="gapBody"></tbody>
     </table></div>
-    <p class="hint" style="margin-top:14px">Counters are kept in memory and start from zero when server-sim restarts. Stored readings are in InfluxDB.</p>
+    <p class="hint" style="margin-top:14px">Counters are kept in memory and start from zero when server-demo restarts. Stored readings are in InfluxDB.</p>
   </section>
 
   <section id="faults">
@@ -109,7 +109,7 @@
 
   <section id="datapoints">
     <h2>Datapoint names</h2>
-    <p class="hint">Name and unit per datapoint, used as the series label in Grafana. The list is every datapoint seen since server-sim started, plus every one already named. Clear both fields to remove a name.</p>
+    <p class="hint">Name and unit per datapoint, used as the series label in Grafana. The list is every datapoint seen since server-demo started, plus every one already named. Clear both fields to remove a name.</p>
     <div class="table-wrap"><table>
       <thead><tr><th>Gateway</th><th class="num">Device</th><th class="num">Datapoint</th><th>Name</th><th>Unit</th><th class="num">Last value</th><th>Quality</th><th>Last reading</th></tr></thead>
       <tbody id="dpBody"></tbody>
@@ -297,7 +297,7 @@ document.querySelectorAll("[data-save]").forEach((b) => b.onclick = () => save(b
 
 async function refresh() {
   try { status = await api("GET", "/api/status"); renderStatus(); }
-  catch (e) { $("conn").textContent = "server-sim unreachable"; $("conn").className = "chip bad"; }
+  catch (e) { $("conn").textContent = "server-demo unreachable"; $("conn").className = "chip bad"; }
 }
 (async () => {
   try { settings = await api("GET", "/api/settings"); renderSettings(); } catch (e) { alert("Could not load settings: " + e.message); }

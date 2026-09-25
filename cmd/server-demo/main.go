@@ -1,4 +1,4 @@
-// server-sim is a minimal fake "Internal Server" used only for local
+// server-demo is a minimal fake "Internal Server" used only for local
 // development and testing of the Store & Forward engine (internal/forwarder).
 // It is not part of the gateway binary and is never deployed to production.
 //
@@ -73,7 +73,7 @@ func main() {
 	set := settings.get()
 	sv.mqtt.apply(set.MQTT.BrokerURL, set.MQTT.DataTopic)
 
-	log.Printf("server-sim listening on %s", *addr)
+	log.Printf("server-demo listening on %s", *addr)
 	if err := http.ListenAndServe(*addr, sv.routes()); err != nil {
 		log.Fatal(err)
 	}

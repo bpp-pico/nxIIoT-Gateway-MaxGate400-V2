@@ -77,7 +77,7 @@ type QueueConfig struct {
 
 // ForwarderConfig controls Store & Forward (§9). Transport selects which
 // Adapter main.go wires up: "http" targets the dev/test adapter
-// (cmd/server-sim, ServerURL); "mqtt" targets MQTTAdapter (see MQTTConfig).
+// (cmd/server-demo, ServerURL); "mqtt" targets MQTTAdapter (see MQTTConfig).
 type ForwarderConfig struct {
 	Transport string `yaml:"transport"`
 	ServerURL string `yaml:"server_url"`

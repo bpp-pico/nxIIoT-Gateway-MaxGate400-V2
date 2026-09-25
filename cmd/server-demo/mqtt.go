@@ -38,7 +38,7 @@ func (c *mqttConsumer) apply(broker, topic string) {
 
 	opts := mqtt.NewClientOptions().
 		AddBroker(broker).
-		SetClientID("server-sim").
+		SetClientID("server-demo").
 		SetAutoReconnect(true).
 		SetConnectRetry(true)
 	opts.SetOnConnectHandler(func(cl mqtt.Client) {
@@ -61,7 +61,7 @@ func (c *mqttConsumer) apply(broker, topic string) {
 	})
 
 	// With ConnectRetry the client keeps trying in the background, so a
-	// broker that is not up yet (or a wrong URL) never stops server-sim.
+	// broker that is not up yet (or a wrong URL) never stops server-demo.
 	c.client = mqtt.NewClient(opts)
 	c.client.Connect()
 }

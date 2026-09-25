@@ -52,7 +52,7 @@ func main() {
 	}
 
 	// docker-compose reaches the fake server via its service DNS name
-	// ("server-sim"), whereas a native run reaches it via localhost — the
+	// ("server-demo"), whereas a native run reaches it via localhost — the
 	// config file default is the native/localhost case.
 	if url := os.Getenv("FORWARDER_SERVER_URL"); url != "" {
 		cfg.Forwarder.ServerURL = url

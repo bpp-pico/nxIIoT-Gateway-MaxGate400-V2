@@ -2,7 +2,7 @@
 
 Audience: the team building the **Internal Server**, the downstream system that receives sensor data from nxIIoT Gateway devices. This document specifies what the server must implement to receive, acknowledge and de-duplicate data from a **V2** gateway. It covers only the wire contract between gateway and server, not the gateway's internals.
 
-A reference implementation of the server side (both transports) is `cmd/server-sim/main.go` in the gateway repo. It is minimal but correct, and the gateway's own tests run against it.
+A reference implementation of the server side (both transports) is `cmd/server-demo/main.go` in the gateway repo. It is minimal but correct, and the gateway's own tests run against it.
 
 > **V2 is not compatible with V1.** The payload, the ack and the de-duplication key all changed (see §11). A server must be updated before V2 gateways are switched on. V1 and V2 gateways can share a broker while they are being migrated; §11 describes how to tell their messages apart.
 
@@ -122,7 +122,7 @@ Access control belongs on the broker: ACLs on `gateway/{id}/...`, plus TLS clien
 
 ## 4. HTTP contract (dev/test only)
 
-`cmd/server-sim`'s `/ingest` endpoint is the reference. **Do not build production infrastructure on this transport.** It has no authentication and no TLS.
+`cmd/server-demo`'s `/ingest` endpoint is the reference. **Do not build production infrastructure on this transport.** It has no authentication and no TLS.
 
 - The gateway sends a `POST` to one configured URL with `Content-Type: application/json`.
 - **The body is exactly the same Message as §3.3.** In V1 the body was a bare array; that is no longer the case.

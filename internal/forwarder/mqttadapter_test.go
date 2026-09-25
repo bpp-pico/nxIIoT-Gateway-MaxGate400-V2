@@ -134,7 +134,7 @@ func newTestMQTTAdapter(t *testing.T, brokerURL string, ackTimeout time.Duration
 }
 
 // startFakeInternalServer stands in for the real Internal Server's MQTT
-// consumer (cmd/server-sim's role, but over MQTT): it subscribes to
+// consumer (cmd/server-demo's role, but over MQTT): it subscribes to
 // dataTopic and, for every batch received, publishes an ack to ackTopic —
 // exercising the adapter's application-level ack round trip for real,
 // not by asserting on internal adapter state.

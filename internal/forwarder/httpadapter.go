@@ -10,7 +10,7 @@ import (
 )
 
 // HTTPAdapter is a minimal Adapter implementation used for local dev/test
-// (cmd/server-sim) and as the fallback transport. §15 requires the
+// (cmd/server-demo) and as the fallback transport. §15 requires the
 // transport to sit behind this interface specifically so it can be swapped
 // for MQTTAdapter without touching the forwarding loop.
 type HTTPAdapter struct {

@@ -43,7 +43,7 @@ type gap struct {
 }
 
 // gatewayStats is what the status page shows per gateway. Counters live in
-// memory and restart from zero when server-sim restarts.
+// memory and restart from zero when server-demo restarts.
 type gatewayStats struct {
 	ID              string           `json:"id"`
 	LastSeen        time.Time        `json:"last_seen"`

@@ -1,5 +1,5 @@
 # Dev/test-only fake "Internal Server", used to exercise Store & Forward
-# end-to-end over HTTP and/or MQTT (see cmd/server-sim). Not part of the
+# end-to-end over HTTP and/or MQTT (see cmd/server-demo). Not part of the
 # production gateway image.
 FROM golang:1.25-alpine AS build
 
@@ -7,9 +7,9 @@ WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/server-sim ./cmd/server-sim
+RUN CGO_ENABLED=0 go build -o /out/server-demo ./cmd/server-demo
 
 FROM alpine:3.20
-COPY --from=build /out/server-sim /server-sim
+COPY --from=build /out/server-demo /server-demo
 EXPOSE 9000
-ENTRYPOINT ["/server-sim"]
+ENTRYPOINT ["/server-demo"]

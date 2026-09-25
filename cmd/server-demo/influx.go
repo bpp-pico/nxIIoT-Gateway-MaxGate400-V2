@@ -18,7 +18,7 @@ import (
 )
 
 // influxWriter talks to InfluxDB 2.x over its plain HTTP API (line protocol
-// for writes), so server-sim needs no client library. The bucket comes from
+// for writes), so server-demo needs no client library. The bucket comes from
 // the current settings on every call, so a change on the config page takes
 // effect on the next write.
 //

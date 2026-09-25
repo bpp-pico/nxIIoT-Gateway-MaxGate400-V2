@@ -24,7 +24,7 @@ go build -o gateway ./cmd/gateway
 
 Two dev-only simulators live under `cmd/` purely to make the gateway testable without physical hardware or a real downstream server — never deployed to production:
 - `cmd/modbus-sim` — fake Modbus TCP slave
-- `cmd/server-sim` — fake HTTP/MQTT consumer for the V2 contract that dedupes on `(gateway_id, stream_id, seq)` and optionally writes to InfluxDB; `test-server/` runs it with EMQX + InfluxDB under Docker (see [test-server/README.md](test-server/README.md))
+- `cmd/server-demo` — fake HTTP/MQTT consumer for the V2 contract that dedupes on `(gateway_id, stream_id, seq)` and optionally writes to InfluxDB; `test-server/` runs it with EMQX + InfluxDB under Docker (see [test-server/README.md](test-server/README.md))
 
 With `SEED_DEMO_DEVICE=true`, the gateway seeds one demo Modbus TCP device (`PM001`, pointed at `modbus-sim`) on first boot if the `device` table is empty.
 
@@ -50,7 +50,7 @@ go build -o gateway.exe ./cmd/gateway
 ## Project layout
 
 ```
-cmd/            gateway, modbus-sim, server-sim entrypoints
+cmd/            gateway, modbus-sim, server-demo entrypoints
 internal/       acquisition, connection, device, datapoint, queue, forwarder, time, netconfig, api, storage, ...
 migrations/     SQLite schema migrations
 configs/        config.yaml (dev defaults), mosquitto.conf (dev broker)
