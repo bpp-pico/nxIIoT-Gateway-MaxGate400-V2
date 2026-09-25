@@ -15,6 +15,8 @@ Decisions so far (user, 2026-09-25):
 - **Outage coverage: as long as possible.** The buffer should hold as many hours/days of undelivered data as `/userdata` (1.6 GB) allows, so storage per reading must be minimised and the cap should be in bytes, not rows (`max_rows` bounded rows, not file size — see MEMORY.md 2026-09-11).
 - **Store only changed values** (report-by-exception) instead of every poll result.
 
+Local storage benchmark (2026-09-25, Python `sqlite3` on the dev machine, 500k synthetic readings shaped like the device's 14 tags, every reading stored, no report-by-exception): current `data_queue` schema **314 B/reading** (matches the device: 638 MB held ~2M rows); option A, one compact row per reading with no secondary index, **24 B**; option B, one row per ~2s chunk of zlib-compressed binary records, **9.3 B**. At 12.5 readings/s with ~1.2 GB usable that is about **3.5 / 46 / 120 days** of buffer. Synthetic values, so B's compression ratio on real data is unverified. Reading the device's real `data_queue` to measure change rate was blocked by the auto-mode classifier ("Production Reads"); not done.
+
 Still open: which storage design (options proposed in chat 2026-09-25, not chosen yet); deadband per datapoint; heartbeat/integrity interval; eviction when full (assumed: drop oldest). Tolerated loss on power failure was not stated — assumed ≤ ~1s of readings.
 No code changed yet.
 
