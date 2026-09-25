@@ -11,9 +11,6 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"github.com/google/uuid"
-
-	"nxiiot-gateway/internal/queue"
 )
 
 // MQTTAdapterConfig configures MQTTAdapter. Durations and a resolved
@@ -32,10 +29,10 @@ type MQTTAdapterConfig struct {
 	ConnectTimeout time.Duration
 	PublishTimeout time.Duration
 	// AckTimeout bounds how long Send waits for the application-level ack
-	// (§15) after the broker has accepted the publish. A batch that times
-	// out here is reported as a failed Send and retried like any other
-	// failure (Rule 7) — the server may still have processed it, but
-	// gateway_id+sequence_id idempotency (Rule 6) makes that safe.
+	// (§15) after the broker has accepted the publish. A message that times
+	// out here is reported as a failed Send and resent like any other
+	// failure — the server may still have stored it, but de-duplication on
+	// (gateway_id, stream_id, seq) makes that safe.
 	AckTimeout time.Duration
 	TLS        *tls.Config // nil disables TLS
 
@@ -53,33 +50,22 @@ const (
 	defaultReconnectStuckAfter = 45 * time.Second
 )
 
-// mqttBatch is the payload published to DataTopic. BatchID correlates the
-// publish with the application-level ack published back to AckTopic — QoS
-// 1's PUBACK only confirms the broker received it, not that the Internal
-// Server processed it, so §15's "ACK/application-level acknowledgement" is
-// a separate round trip on top of QoS 1.
-type mqttBatch struct {
-	BatchID string      `json:"batch_id"`
-	Entries []WireEntry `json:"entries"`
-}
-
-// mqttAck is the payload the Internal Server publishes to AckTopic once it
-// has processed (or rejected) a batch.
-type mqttAck struct {
-	BatchID string `json:"batch_id"`
-	Error   string `json:"error,omitempty"`
-}
-
-// MQTTAdapter is the production Adapter (§15): publishes batches to
-// DataTopic at QoS 1 and waits for an application-level ack on AckTopic.
-// Connect/reconnect is delegated to paho's built-in auto-reconnect.
+// MQTTAdapter is the production Adapter (§15): publishes each Message to
+// DataTopic at QoS 1 and waits for an application-level Ack on AckTopic
+// whose to_seq matches — QoS 1's PUBACK only confirms the broker received
+// the message, not that the server stored it. Connect/reconnect is
+// delegated to paho's built-in auto-reconnect.
 type MQTTAdapter struct {
 	client mqtt.Client
 	cfg    MQTTAdapterConfig
 	log    *slog.Logger
 
-	mu      sync.Mutex
-	pending map[string]chan mqttAck
+	mu sync.Mutex
+	// pending maps a message's to_seq to the channel its Send waits on.
+	pending map[int64]chan Ack
+	// streamID of the message awaiting each ack, to ignore an ack that
+	// names a different stream.
+	pendingStream map[int64]string
 	// disconnectedAt is zero only in the instant right after onConnect
 	// fires — NewMQTTAdapter sets it to time.Now() immediately so a fresh
 	// client that has never connected at all counts as disconnected from
@@ -99,7 +85,7 @@ func NewMQTTAdapter(cfg MQTTAdapterConfig, log *slog.Logger) *MQTTAdapter {
 	if cfg.ReconnectStuckAfter <= 0 {
 		cfg.ReconnectStuckAfter = defaultReconnectStuckAfter
 	}
-	a := &MQTTAdapter{cfg: cfg, log: log, pending: make(map[string]chan mqttAck), disconnectedAt: time.Now()}
+	a := &MQTTAdapter{cfg: cfg, log: log, pending: make(map[int64]chan Ack), pendingStream: make(map[int64]string), disconnectedAt: time.Now()}
 
 	opts := mqtt.NewClientOptions().
 		AddBroker(cfg.BrokerURL).
@@ -273,45 +259,49 @@ func (a *MQTTAdapter) checkAndForceReconnect() {
 }
 
 func (a *MQTTAdapter) handleAck(_ mqtt.Client, msg mqtt.Message) {
-	var ack mqttAck
+	var ack Ack
 	if err := json.Unmarshal(msg.Payload(), &ack); err != nil {
 		a.log.Warn("mqtt: invalid ack payload", "error", err)
 		return
 	}
 
 	a.mu.Lock()
-	ch, ok := a.pending[ack.BatchID]
+	ch, ok := a.pending[ack.ToSeq]
+	stream := a.pendingStream[ack.ToSeq]
 	a.mu.Unlock()
-	if !ok {
-		// Late ack for a batch Send() already gave up waiting on, or a
-		// duplicate ack — either way there is nothing left to signal.
+	if !ok || (ack.StreamID != "" && ack.StreamID != stream) {
+		// Late ack for a message Send already gave up on, a duplicate,
+		// or an ack for another stream — nothing is waiting for it.
 		return
 	}
-	ch <- ack
+	select {
+	case ch <- ack:
+	default: // a duplicate ack already delivered; don't block paho's handler
+	}
 }
 
-// Send publishes batch to DataTopic at QoS 1 and waits for the
+// Send publishes msg to DataTopic at QoS 1 and waits for the matching
 // application-level ack on AckTopic (§15). Duplicate handling is the
-// server's responsibility via gateway_id+sequence_id (Rule 6/7) — Send
-// does not attempt client-side deduplication, matching HTTPAdapter.
-func (a *MQTTAdapter) Send(ctx context.Context, batch []queue.DispatchEntry) error {
+// server's job, via (gateway_id, stream_id, seq), as with HTTPAdapter.
+func (a *MQTTAdapter) Send(ctx context.Context, msg Message) error {
 	if !a.IsConnected() {
 		return fmt.Errorf("mqtt: not connected to %s", a.cfg.BrokerURL)
 	}
 
-	payload := mqttBatch{BatchID: uuid.NewString(), Entries: toWireEntries(batch)}
-	body, err := json.Marshal(payload)
+	body, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("marshal batch: %w", err)
+		return fmt.Errorf("marshal message: %w", err)
 	}
 
-	ackCh := make(chan mqttAck, 1)
+	ackCh := make(chan Ack, 1)
 	a.mu.Lock()
-	a.pending[payload.BatchID] = ackCh
+	a.pending[msg.ToSeq] = ackCh
+	a.pendingStream[msg.ToSeq] = msg.StreamID
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
-		delete(a.pending, payload.BatchID)
+		delete(a.pending, msg.ToSeq)
+		delete(a.pendingStream, msg.ToSeq)
 		a.mu.Unlock()
 	}()
 
@@ -323,13 +313,13 @@ func (a *MQTTAdapter) Send(ctx context.Context, batch []queue.DispatchEntry) err
 	select {
 	case ack := <-ackCh:
 		if ack.Error != "" {
-			return fmt.Errorf("server rejected batch %s: %s", payload.BatchID, ack.Error)
+			return fmt.Errorf("server rejected seq %d-%d: %s", msg.FromSeq, msg.ToSeq, ack.Error)
 		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(a.cfg.AckTimeout):
-		return fmt.Errorf("mqtt: timed out waiting for ack of batch %s", payload.BatchID)
+		return fmt.Errorf("mqtt: timed out waiting for ack of seq %d-%d", msg.FromSeq, msg.ToSeq)
 	}
 }
 

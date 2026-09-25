@@ -242,7 +242,6 @@ func (p *Poller) decodeAndEmit(d device.Device, dp datapoint.DataPoint, raw []by
 		Value:          &value,
 		Quality:        modbus.Good,
 		Unit:           dp.Unit,
-		Priority:       string(dp.Priority),
 		EventTimestamp: eventTime,
 	})
 }
@@ -264,7 +263,6 @@ func (p *Poller) badReading(d device.Device, dp datapoint.DataPoint, eventTime t
 		Value:          nil,
 		Quality:        q,
 		Unit:           dp.Unit,
-		Priority:       string(dp.Priority),
 		EventTimestamp: eventTime,
 	}
 }

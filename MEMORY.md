@@ -6,6 +6,13 @@ Carried over from the original nxIIoT Gateway monorepo's MEMORY.md — entries s
 
 ---
 
+**`PRAGMA incremental_vacuum` run with `db.Exec` freed almost nothing — the V2 queue file did not shrink after its data was deleted (2026-09-25, caught by a unit test before any deploy):**
+- what: `TestAutoVacuumShrinksFileAfterAck` failed: after acking (deleting) every chunk and running maintenance, `queue.db` went 98,304 → 94,208 bytes. `PRAGMA auto_vacuum` was correctly `2` (INCREMENTAL).
+- root cause: `incremental_vacuum` releases free pages as its statement is *stepped*, one step per page. `database/sql`'s `Exec` on modernc.org/sqlite does not step it to completion, so only a page or so was released. Switching to `QueryContext` and reading the rows to the end made the same test pass. The first eviction test failed for the same reason: the file never shrank, so the size limit kept looking exceeded.
+- correct: **run `PRAGMA incremental_vacuum` with `QueryContext` and drain the rows (`for rows.Next() {}`), never `Exec`** (`internal/queue/capacity.go`'s `compact`). More generally, for any PRAGMA that does work per row it returns, check the effect (file size, `freelist_count`) in a test rather than trusting that the call returned no error.
+
+---
+
 **The device's 1.6 GB `/userdata` partition filled to 100% with a `queue.max_rows` of 2,500,000 and an 870 MB WAL — the gateway lost readings and its own eviction sweeper could not run to fix it (2026-09-11):**
 - what: `/userdata` had 0 bytes available; `gateway.db` 638 MB + `gateway.db-wal` 870 MB. Every reading logged `failed to persist reading ... database or disk is full (13)` and each 60s `storage-full eviction failed` tick failed with the same error, so the queue could not shrink itself. Full timeline and numbers in spec.md's 2026-09-11 entry.
 - root cause: established — free space was 0 and both inserts and the sweeper's `DELETE` need to write WAL frames, so at 0 free the in-process recovery path is dead (a deadlock the app cannot leave on its own). Inferred, not proven — `max_rows: 2500000` (5x the repo default) was chosen without budgeting for the 1.6 GB partition, and for the WAL, which was larger than the DB itself. Not root-caused: why the WAL reached 870 MB.

@@ -2,66 +2,30 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { styles } from '../styles'
 import { Icon } from '../icons'
-import { fmtNum } from '../format'
+import { fmtBytes, fmtNum } from '../format'
 import type { DashboardSummary, StoreForwardStatus, SystemInfo, TimeStatus } from '../types'
 
 function fmtPercent(v?: number) {
   return v === undefined ? '—' : `${v.toFixed(1)}%`
 }
 
-function fmtBytes(v?: number) {
-  if (v === undefined) return '—'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let n = v
-  let i = 0
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024
-    i++
-  }
-  return `${n.toFixed(1)} ${units[i]}`
-}
-
-// timeUntilEvictionSeconds estimates, at the current write rate, how long
-// until eviction is forced to start deleting not-yet-sent (PENDING/
-// SENDING) rows rather than already-SENT ones. Acquisition always writes
-// to data_queue regardless of server connectivity (Rule 1 - see
-// HANDOFF.md), so this holds whether the server is currently reachable or
-// not: it's the answer to "if we lost the connection right now, how long
-// before undelivered data is actually at risk."
+// bufferRemainingSeconds estimates how long the queue can keep taking new
+// readings before it reaches max_bytes and starts evicting unsent data —
+// "if the server went away now, how long until we lose data". Acquisition
+// queues every reading whether or not the server is reachable (Rule 1), so
+// today's write rate is the rate that would apply during an outage. In V2
+// the queue only holds unacknowledged data, so the room left is simply
+// max_bytes - queue_bytes, at avg_bytes_per_reading per reading.
 //
-// Deliberately NOT (max_rows - total_rows) / write_rate - that measures
-// time until the *next eviction tick*, not time until real data loss.
-// Once RunMaxRowsSweeper is keeping total_rows hovering near max_rows (its
-// intended steady state), that number is small essentially all the time
-// even though the server is connected and every evicted row is already-
-// SENT and safe to lose - a false alarm found live on 2026-09-10.
-//
-// The correct budget doesn't depend on total_rows at all: SENT rows are
-// evicted before PENDING/SENDING ones (oldest-non-critical-first already
-// prefers whatever isn't still needed), so the number of *new* rows that
-// can arrive before eviction is forced into PENDING/SENDING data is
-// max_rows - currently-undelivered-rows, regardless of how much SENT
-// buffer currently exists - that buffer is fully counted, implicitly, by
-// not subtracting total_rows.
-//
-// Caveat: this assumes SENT rows are evicted before PENDING/SENDING ones
-// in practice. Eviction order is actually priority-tier first (LOW before
-// NORMAL before HIGH) and oldest-within-tier second, regardless of
-// status - so if PENDING data is concentrated in a lower priority tier
-// than old SENT data, eviction could reach a PENDING row earlier than
-// this estimate implies. Still far more accurate than measuring against
-// total_rows.
-function timeUntilEvictionSeconds(
-  maxRows?: number,
-  pendingRecords?: number,
-  sendingRecords?: number,
-  writeRatePerSec?: number,
-): number | null {
-  if (maxRows == null || pendingRecords == null || sendingRecords == null || writeRatePerSec == null || writeRatePerSec <= 0)
-    return null
-  const rowsRemaining = maxRows - pendingRecords - sendingRecords
-  if (rowsRemaining <= 0) return 0
-  return rowsRemaining / writeRatePerSec
+// Approximate: avg_bytes_per_reading is the compressed chunk size and
+// leaves out SQLite page overhead, so the real figure is somewhat lower;
+// and the min_free_percent floor can trigger eviction earlier if something
+// else fills the disk.
+function bufferRemainingSeconds(sf: StoreForwardStatus): number | null {
+  if (sf.write_rate_per_sec <= 0 || sf.avg_bytes_per_reading <= 0) return null
+  const bytesLeft = sf.max_bytes - sf.queue_bytes
+  if (bytesLeft <= 0) return 0
+  return bytesLeft / sf.avg_bytes_per_reading / sf.write_rate_per_sec
 }
 
 function fmtDuration(seconds: number | null): string {
@@ -219,46 +183,40 @@ export function Dashboard() {
 
         <div style={styles.card}>
           <div style={styles.cardIcon}><Icon name="queue" /></div>
-          <div style={styles.cardTitle}>Pending Queue</div>
-          <div style={styles.cardValue}>{fmtNum(storeForward.pending_records)}</div>
-          <div style={styles.cardSub}>{fmtNum(storeForward.retry_count)} retries so far</div>
+          <div style={styles.cardTitle}>Pending Readings</div>
+          <div style={styles.cardValue}>{fmtNum(storeForward.pending_readings + storeForward.buffered_readings)}</div>
+          <div style={styles.cardSub}>
+            not yet acknowledged by the server
+            {storeForward.evicted_readings > 0 && ` · ${fmtNum(storeForward.evicted_readings)} evicted when full`}
+          </div>
         </div>
 
         <div style={styles.card}>
           <div style={styles.cardIcon}><Icon name="clock" /></div>
           <div style={styles.cardTitle}>Queue Size</div>
           <div style={styles.cardValue}>
-            {storeForward.total_rows != null ? fmtNum(storeForward.total_rows) : '—'}
-            {storeForward.max_rows != null ? ` / ${fmtNum(storeForward.max_rows)}` : ''}
+            {fmtBytes(storeForward.queue_bytes)} / {fmtBytes(storeForward.max_bytes)}
           </div>
-          <div style={styles.cardSub}>oldest non-critical records are evicted once max rows is exceeded</div>
+          <div style={styles.cardSub}>
+            {storeForward.avg_bytes_per_reading > 0 && `~${storeForward.avg_bytes_per_reading.toFixed(1)} B per reading · `}
+            oldest unsent readings are evicted once full
+          </div>
         </div>
 
         <div style={styles.card}>
           <div style={styles.cardIcon}><Icon name="activity" /></div>
           <div style={styles.cardTitle}>Queue Write Rate</div>
-          <div style={styles.cardValue}>
-            {storeForward.write_rate_per_sec != null ? `${storeForward.write_rate_per_sec.toFixed(1)} rows/s` : '—'}
-          </div>
-          <div style={styles.cardSub}>must stay below eviction capacity for Queue Size to stay bounded</div>
+          <div style={styles.cardValue}>{storeForward.write_rate_per_sec.toFixed(1)} readings/s</div>
+          <div style={styles.cardSub}>readings queued per second, averaged over ~30 s</div>
         </div>
 
         <div style={styles.card}>
           <div style={styles.cardIcon}><Icon name="timeout" /></div>
-          <div style={styles.cardTitle}>Est. Time Until Data Loss Risk</div>
-          <div style={styles.cardValue}>
-            {fmtDuration(
-              timeUntilEvictionSeconds(
-                storeForward.max_rows,
-                storeForward.pending_records,
-                storeForward.sending_records,
-                storeForward.write_rate_per_sec,
-              ),
-            )}
-          </div>
+          <div style={styles.cardTitle}>Est. Outage Buffer Remaining</div>
+          <div style={styles.cardValue}>{fmtDuration(bufferRemainingSeconds(storeForward))}</div>
           <div style={styles.cardSub}>
-            if the server stays unreachable starting now, how long until not-yet-sent data is actually at risk of
-            being overwritten (not just when Queue Size next evicts already-sent records)
+            if the server stays unreachable starting now, roughly how long until the queue is full and the oldest
+            unsent readings start being evicted
           </div>
         </div>
 

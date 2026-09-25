@@ -70,30 +70,31 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// SQLite is the gateway's source of truth (Rule 3); data must be
-	// persisted before being forwarded (Rule 2). queueRepo owns the
-	// data_queue table and the gateway's persistent sequence counter
-	// (Rule 6). EnsureGateway must run before anything assigns a sequence
-	// ID, since the counter lives on the gateway's own row.
-	queueRepo := queue.NewRepository(db)
-	if err := queueRepo.EnsureGateway(ctx, cfg.Gateway.ID, cfg.Gateway.Name); err != nil {
-		log.Error("failed to initialize gateway row", "error", err)
-		os.Exit(1)
+	// Store & Forward queue (Rule 2/3: persisted before it is forwarded):
+	// its own SQLite file, separate from gateway.db, holding compressed
+	// chunks of readings — see internal/queue.
+	var q *queue.Store
+	if !cfg.StoreForward.Disabled {
+		q, err = queue.Open(cfg.Queue.Path, queue.Options{
+			MaxBytes:            cfg.Queue.MaxBytes,
+			MinFreePercent:      cfg.Queue.MinFreePercent,
+			FlushInterval:       time.Duration(cfg.Queue.FlushIntervalMs) * time.Millisecond,
+			MaintenanceInterval: time.Duration(cfg.Queue.MaintenanceIntervalSec) * time.Second,
+			DiskUsage:           func() (uint64, uint64, error) { return storage.DiskUsage(cfg.Queue.Path) },
+		}, log)
+		if err != nil {
+			log.Error("failed to open queue", "path", cfg.Queue.Path, "error", err)
+			os.Exit(1)
+		}
+		defer func() {
+			if err := q.Close(); err != nil {
+				log.Error("failed to close queue cleanly", "error", err)
+			}
+		}()
+		go q.RunFlusher(ctx)
+		go q.RunMaintenance(ctx)
 	}
-	proc := processor.New(queueRepo, cfg.Gateway.ID, log)
-
-	go queue.RunMaxRowsSweeper(ctx, queueRepo,
-		cfg.Queue.MaxRows,
-		cfg.Queue.EvictBatchSize,
-		time.Duration(cfg.Queue.MaxRowsSweepInterval)*time.Second,
-		log)
-
-	go queue.RunStoragePressureSweeper(ctx, queueRepo,
-		func() (float64, error) { return storage.DiskUsagePercent(cfg.Database.Path) },
-		cfg.Queue.StorageFullPercent,
-		cfg.Queue.EvictBatchSize,
-		time.Duration(cfg.Queue.StorageSweepInterval)*time.Second,
-		log)
+	proc := processor.New(q)
 
 	// Time Service (Rule 8/9/10): an unreachable NTP server only degrades
 	// TimeQuality, it never blocks acquisition — this goroutine shares
@@ -126,7 +127,7 @@ func main() {
 			At:      r.EventTimestamp,
 		})
 		if !cfg.StoreForward.Disabled {
-			proc.Process(ctx, r)
+			proc.Process(r)
 		}
 		if r.Value != nil {
 			log.Info("reading", "device", r.DeviceName, "tag", r.Tag, "value", *r.Value, "unit", r.Unit, "quality", r.Quality)
@@ -141,9 +142,9 @@ func main() {
 	}
 
 	// Store & Forward runs independently of acquisition (Rule 1): a down
-	// server only grows the PENDING backlog, it never blocks Modbus polling.
-	// StoreForward.Disabled skips this whole block - no queue writes (see
-	// the acquisition callback above), no adapter, no MQTT/HTTP connection
+	// server only grows the queue, it never blocks Modbus polling.
+	// StoreForward.Disabled skips this whole block - no queue (see above
+	// and the acquisition callback), no adapter, no MQTT/HTTP connection
 	// attempt, no forwarder goroutine. fwd stays nil; the API layer already
 	// handles a nil forwarder (see internal/api/storeforward.go).
 	var fwd *forwarder.Forwarder
@@ -157,9 +158,10 @@ func main() {
 		}
 		defer closeAdapter()
 
-		fwd = forwarder.New(queueRepo, adapter, forwarder.Config{
-			BatchSize:    cfg.Forwarder.BatchSize,
-			PollInterval: time.Duration(cfg.Forwarder.PollIntervalMs) * time.Millisecond,
+		fwd = forwarder.New(q, adapter, forwarder.Config{
+			GatewayID:             cfg.Gateway.ID,
+			MaxReadingsPerMessage: cfg.Forwarder.MaxReadingsPerMessage,
+			PollInterval:          time.Duration(cfg.Forwarder.PollIntervalMs) * time.Millisecond,
 		}, log)
 		go fwd.Run(ctx)
 	}
@@ -171,7 +173,7 @@ func main() {
 	// degrades to netconfig.ErrUnsupported wherever nmcli isn't present.
 	netSvc := netconfig.NewService(netconfig.New(), log)
 
-	handler := api.NewRouter(cfg, *configPath, db, log, statusStore, latestStore, manager, queueRepo, fwd, timeSvc, diagStore, logBuf, netSvc)
+	handler := api.NewRouter(cfg, *configPath, db, log, statusStore, latestStore, manager, q, fwd, timeSvc, diagStore, logBuf, netSvc)
 	srv := &http.Server{
 		Addr:    cfg.API.ListenAddr,
 		Handler: handler,

@@ -17,7 +17,6 @@ import (
 	"github.com/mochi-mqtt/server/v2/listeners"
 
 	"nxiiot-gateway/internal/forwarder"
-	"nxiiot-gateway/internal/queue"
 )
 
 // syncBuffer is a concurrency-safe io.Writer for asserting on log output
@@ -139,28 +138,20 @@ func newTestMQTTAdapter(t *testing.T, brokerURL string, ackTimeout time.Duration
 // dataTopic and, for every batch received, publishes an ack to ackTopic —
 // exercising the adapter's application-level ack round trip for real,
 // not by asserting on internal adapter state.
-type receivedBatch struct {
-	BatchID string
-	Entries []forwarder.WireEntry
-}
-
-func startFakeInternalServer(t *testing.T, brokerURL, dataTopic, ackTopic string) <-chan receivedBatch {
+func startFakeInternalServer(t *testing.T, brokerURL, dataTopic, ackTopic string) <-chan forwarder.Message {
 	t.Helper()
-	received := make(chan receivedBatch, 10)
+	received := make(chan forwarder.Message, 10)
 
 	opts := pahomqtt.NewClientOptions().AddBroker(brokerURL).SetClientID("fake-internal-server")
 	opts.SetDefaultPublishHandler(func(client pahomqtt.Client, msg pahomqtt.Message) {
-		var batch struct {
-			BatchID string                `json:"batch_id"`
-			Entries []forwarder.WireEntry `json:"entries"`
-		}
-		if err := json.Unmarshal(msg.Payload(), &batch); err != nil {
-			t.Errorf("fake server: invalid batch payload: %v", err)
+		var m forwarder.Message
+		if err := json.Unmarshal(msg.Payload(), &m); err != nil {
+			t.Errorf("fake server: invalid message payload: %v", err)
 			return
 		}
-		received <- receivedBatch{BatchID: batch.BatchID, Entries: batch.Entries}
+		received <- m
 
-		ack, _ := json.Marshal(map[string]string{"batch_id": batch.BatchID})
+		ack, _ := json.Marshal(forwarder.Ack{StreamID: m.StreamID, ToSeq: m.ToSeq})
 		client.Publish(ackTopic, 1, false, ack)
 	})
 
@@ -176,13 +167,13 @@ func startFakeInternalServer(t *testing.T, brokerURL, dataTopic, ackTopic string
 	return received
 }
 
-func sampleBatch() []queue.DispatchEntry {
+func sampleMessage() forwarder.Message {
 	v := 230.2
-	return []queue.DispatchEntry{
-		{Entry: queue.Entry{
-			ID: 1, GatewayID: "GW001", SequenceID: 1, DeviceID: 1, DatapointID: 1,
-			Value: &v, Quality: "GOOD", EventTimestamp: time.Now(), Priority: "NORMAL",
-		}},
+	return forwarder.Message{
+		GatewayID: "GW001", StreamID: "stream-1", FromSeq: 7, ToSeq: 7,
+		Chunks: []forwarder.WireChunk{{Seq: 7, Readings: []forwarder.WireReading{
+			{DeviceID: 1, DatapointID: 1, Timestamp: "2026-09-25T08:00:00.000Z", Value: &v, Quality: "GOOD"},
+		}}},
 	}
 }
 
@@ -201,17 +192,17 @@ func TestMQTTAdapterSendSucceedsWhenServerAcks(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := adapter.Send(ctx, sampleBatch()); err != nil {
+	if err := adapter.Send(ctx, sampleMessage()); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
 	select {
 	case got := <-received:
-		if len(got.Entries) != 1 || got.Entries[0].SequenceID != 1 || got.Entries[0].GatewayID != "GW001" {
-			t.Errorf("fake server received unexpected batch: %+v", got.Entries)
+		if got.GatewayID != "GW001" || got.ToSeq != 7 || got.ReadingCount() != 1 || *got.Chunks[0].Readings[0].Value != 230.2 {
+			t.Errorf("fake server received unexpected message: %+v", got)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("fake server never received the published batch")
+		t.Fatal("fake server never received the published message")
 	}
 }
 
@@ -222,7 +213,7 @@ func TestMQTTAdapterSendFailsWhenAckNeverArrives(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := adapter.Send(ctx, sampleBatch())
+	err := adapter.Send(ctx, sampleMessage())
 	if err == nil {
 		t.Fatal("expected Send to fail when no application-level ack arrives")
 	}
@@ -448,7 +439,7 @@ func TestMQTTAdapterSendFailsFastWhenNotConnected(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := adapter.Send(ctx, sampleBatch())
+	err := adapter.Send(ctx, sampleMessage())
 	elapsed := time.Since(start)
 
 	if err == nil {

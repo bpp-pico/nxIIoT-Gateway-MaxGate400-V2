@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,21 +36,15 @@ type Server struct {
 	status        *status.Store
 	latest        *acquisition.LatestStore
 	manager       *acquisition.Manager
-	queueRepo     *queue.Repository
+	queue         *queue.Store // nil when Store & Forward is disabled
 	forwarder     *forwarder.Forwarder
 	timeSvc       *timeservice.Service
 	diag          *diagnostics.Store
 	logBuf        *logger.RingBuffer
 	netSvc        *netconfig.Service
-
-	// statsCache holds the last queue.Repository.Stats() result for
-	// getStoreForwardStatus — see statsCacheTTL in storeforward.go for why.
-	statsCacheMu sync.Mutex
-	statsCache   queue.Stats
-	statsCacheAt time.Time
 }
 
-func NewRouter(cfg *config.Config, configPath string, db *sql.DB, log *slog.Logger, statusStore *status.Store, latestStore *acquisition.LatestStore, manager *acquisition.Manager, queueRepo *queue.Repository, fwd *forwarder.Forwarder, timeSvc *timeservice.Service, diag *diagnostics.Store, logBuf *logger.RingBuffer, netSvc *netconfig.Service) http.Handler {
+func NewRouter(cfg *config.Config, configPath string, db *sql.DB, log *slog.Logger, statusStore *status.Store, latestStore *acquisition.LatestStore, manager *acquisition.Manager, q *queue.Store, fwd *forwarder.Forwarder, timeSvc *timeservice.Service, diag *diagnostics.Store, logBuf *logger.RingBuffer, netSvc *netconfig.Service) http.Handler {
 	s := &Server{
 		cfg:           cfg,
 		configPath:    configPath,
@@ -63,7 +56,7 @@ func NewRouter(cfg *config.Config, configPath string, db *sql.DB, log *slog.Logg
 		status:        statusStore,
 		latest:        latestStore,
 		manager:       manager,
-		queueRepo:     queueRepo,
+		queue:         q,
 		forwarder:     fwd,
 		timeSvc:       timeSvc,
 		diag:          diag,

@@ -27,7 +27,6 @@ type dataPointDTO struct {
 	Scale           float64    `json:"scale"`
 	Offset          float64    `json:"offset"`
 	Unit            string     `json:"unit,omitempty"`
-	Priority        string     `json:"priority,omitempty"`
 	Enabled         bool       `json:"enabled"`
 	LastValue       *float64   `json:"last_value,omitempty"`
 	LastQuality     string     `json:"last_quality,omitempty"`
@@ -47,7 +46,6 @@ func toDataPointDTO(dp datapoint.DataPoint) dataPointDTO {
 		Scale:           dp.Scale,
 		Offset:          dp.Offset,
 		Unit:            dp.Unit,
-		Priority:        string(dp.Priority),
 		Enabled:         dp.Enabled,
 	}
 }
@@ -84,7 +82,6 @@ func (dto dataPointDTO) toDataPoint() datapoint.DataPoint {
 		Scale:           dto.Scale,
 		Offset:          dto.Offset,
 		Unit:            dto.Unit,
-		Priority:        datapoint.Priority(dto.Priority),
 		Enabled:         dto.Enabled,
 	}
 }

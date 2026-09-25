@@ -1,5 +1,4 @@
 export type Protocol = 'RTU' | 'TCP'
-export type Priority = 'CRITICAL' | 'HIGH' | 'NORMAL' | 'LOW'
 export type DataType = 'INT16' | 'UINT16' | 'INT32' | 'UINT32' | 'FLOAT32' | 'FLOAT64'
 
 export interface Connection {
@@ -44,7 +43,6 @@ export interface DataPoint {
   scale: number
   offset: number
   unit?: string
-  priority?: Priority
   enabled: boolean
   last_value?: number | null
   last_quality?: string
@@ -88,22 +86,30 @@ export interface DashboardSummary {
   data_point_count: number
 }
 
+// V2 queue (internal/queue): readings stored in compressed chunks in
+// queue.db until the server acks them. Every stored reading is pending.
 export interface StoreForwardStatus {
-  pending_records: number
-  sending_records: number
+  enabled: boolean
+  stream_id?: string
+  pending_readings: number
+  pending_chunks: number
+  // in memory, written to queue.db at the next flush (every ~2 s)
+  buffered_readings: number
   oldest_pending?: string
   newest_pending?: string
-  retry_count: number
+  queue_bytes: number
+  max_bytes: number
+  // unsent readings deleted because the queue was full (life of queue.db)
+  evicted_readings: number
+  // readings lost since start because queue.db could not be written
+  dropped_readings: number
+  write_rate_per_sec: number
+  avg_bytes_per_reading: number
   storage_used_percent?: number
   storage_level?: 'NORMAL' | 'WARNING' | 'CRITICAL' | 'FULL'
   server_connected: boolean
   server_last_error?: string
   server_last_sent_at?: string
-  // Optional: a gateway build from before these fields existed won't send
-  // them (the Web UI hot-reloads independently of the Go binary here).
-  total_rows?: number
-  max_rows?: number
-  write_rate_per_sec?: number
 }
 
 export interface TimeStatus {
@@ -180,8 +186,8 @@ export interface Settings {
   // existed (a real possibility here — the Web UI hot-reloads on `git pull`
   // independently of the Go binary, which needs a manual rebuild+swap).
   queue?: {
-    max_rows: number
-    evict_batch_size: number
+    max_bytes: number
+    min_free_percent: number
   }
   // Optional: absent when talking to a gateway build from before this field
   // existed. Defaults to true (enabled) when missing.

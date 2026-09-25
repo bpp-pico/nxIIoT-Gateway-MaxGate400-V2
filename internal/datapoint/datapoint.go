@@ -10,15 +10,6 @@ import (
 	"nxiiot-gateway/internal/modbus"
 )
 
-type Priority string
-
-const (
-	Critical Priority = "CRITICAL"
-	High     Priority = "HIGH"
-	Normal   Priority = "NORMAL"
-	Low      Priority = "LOW"
-)
-
 var ErrNotFound = errors.New("datapoint not found")
 
 type DataPoint struct {
@@ -33,7 +24,6 @@ type DataPoint struct {
 	Scale           float64
 	Offset          float64
 	Unit            string
-	Priority        Priority
 	Enabled         bool
 }
 
@@ -50,11 +40,6 @@ func (dp DataPoint) Validate() error {
 	if _, err := modbus.DataType(dp.DataType).ByteWidth(); err != nil {
 		return fmt.Errorf("data_type: %w", err)
 	}
-	switch dp.Priority {
-	case Critical, High, Normal, Low, "":
-	default:
-		return fmt.Errorf("priority must be one of CRITICAL, HIGH, NORMAL, LOW")
-	}
 	if dp.Scale == 0 {
 		return fmt.Errorf("scale must not be zero")
 	}
@@ -70,7 +55,7 @@ func NewRepository(db *sql.DB) *Repository {
 }
 
 const selectColumns = `id, device_id, tag_name, function_code, register_address, data_type,
-	byte_order, word_order, scale, offset, unit, priority, enabled`
+	byte_order, word_order, scale, offset, unit, enabled`
 
 func scanDataPoint(row interface{ Scan(...any) error }) (DataPoint, error) {
 	var dp DataPoint
@@ -78,7 +63,7 @@ func scanDataPoint(row interface{ Scan(...any) error }) (DataPoint, error) {
 	var enabled int
 	err := row.Scan(&dp.ID, &dp.DeviceID, &dp.TagName, &dp.FunctionCode, &dp.RegisterAddress,
 		&dp.DataType, &dp.ByteOrder, &dp.WordOrder, &dp.Scale, &dp.Offset, &unit,
-		&dp.Priority, &enabled)
+		&enabled)
 	if err != nil {
 		return DataPoint{}, err
 	}
@@ -140,11 +125,11 @@ func (r *Repository) Get(ctx context.Context, id int64) (DataPoint, error) {
 func (r *Repository) Create(ctx context.Context, dp DataPoint) (int64, error) {
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO datapoint (device_id, tag_name, function_code, register_address, data_type,
-		                        byte_order, word_order, scale, offset, unit, priority, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                        byte_order, word_order, scale, offset, unit, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		dp.DeviceID, dp.TagName, dp.FunctionCode, dp.RegisterAddress, dp.DataType,
 		dp.ByteOrder, dp.WordOrder, dp.Scale, dp.Offset, nullable(dp.Unit),
-		priorityOrDefault(dp.Priority), boolToInt(dp.Enabled))
+		boolToInt(dp.Enabled))
 	if err != nil {
 		return 0, err
 	}
@@ -157,12 +142,12 @@ func (r *Repository) Update(ctx context.Context, id int64, dp DataPoint) error {
 		UPDATE datapoint SET
 			tag_name = ?, function_code = ?, register_address = ?, data_type = ?,
 			byte_order = ?, word_order = ?, scale = ?, offset = ?, unit = ?,
-			priority = ?, enabled = ?,
+			enabled = ?,
 			updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		WHERE id = ?`,
 		dp.TagName, dp.FunctionCode, dp.RegisterAddress, dp.DataType,
 		dp.ByteOrder, dp.WordOrder, dp.Scale, dp.Offset, nullable(dp.Unit),
-		priorityOrDefault(dp.Priority), boolToInt(dp.Enabled), id)
+		boolToInt(dp.Enabled), id)
 	if err != nil {
 		return err
 	}
@@ -201,11 +186,4 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
-}
-
-func priorityOrDefault(p Priority) Priority {
-	if p == "" {
-		return Normal
-	}
-	return p
 }

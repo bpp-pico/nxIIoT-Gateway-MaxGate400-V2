@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { styles } from '../styles'
 import { Icon } from '../icons'
-import { fmtNum } from '../format'
+import { fmtBytes, fmtNum } from '../format'
 import type { StoreForwardStatus } from '../types'
 
 function fmtTime(v?: string) {
@@ -64,30 +64,35 @@ export function StoreForwardPage() {
 
             <div style={styles.card}>
               <div style={styles.cardIcon}><Icon name="queue" /></div>
-              <div style={styles.cardTitle}>Pending Records</div>
-              <div style={styles.cardValue}>{fmtNum(status.pending_records)}</div>
+              <div style={styles.cardTitle}>Pending Readings</div>
+              <div style={styles.cardValue}>{fmtNum(status.pending_readings)}</div>
+              <div style={styles.cardSub}>stored, waiting for the server's ack · {fmtNum(status.pending_chunks)} chunks</div>
             </div>
 
             <div style={styles.card}>
               <div style={styles.cardIcon}><Icon name="sending" /></div>
-              <div style={styles.cardTitle}>Sending</div>
-              <div style={styles.cardValue}>{fmtNum(status.sending_records)}</div>
+              <div style={styles.cardTitle}>In Memory</div>
+              <div style={styles.cardValue}>{fmtNum(status.buffered_readings)}</div>
+              <div style={styles.cardSub}>written to disk at the next flush (every ~2 s)</div>
             </div>
 
             <div style={styles.card}>
               <div style={styles.cardIcon}><Icon name="retry" /></div>
-              <div style={styles.cardTitle}>Retry Count</div>
-              <div style={styles.cardValue}>{fmtNum(status.retry_count)}</div>
+              <div style={styles.cardTitle}>Readings Lost</div>
+              <div style={styles.cardValue}>{fmtNum(status.evicted_readings + status.dropped_readings)}</div>
+              <div style={styles.cardSub}>
+                {fmtNum(status.evicted_readings)} evicted when the queue was full · {fmtNum(status.dropped_readings)}{' '}
+                not written to disk since start
+              </div>
             </div>
 
             <div style={styles.card}>
               <div style={styles.cardIcon}><Icon name="clock" /></div>
               <div style={styles.cardTitle}>Queue Size</div>
               <div style={styles.cardValue}>
-                {status.total_rows != null ? fmtNum(status.total_rows) : '—'}
-                {status.max_rows != null ? ` / ${fmtNum(status.max_rows)}` : ''}
+                {fmtBytes(status.queue_bytes)} / {fmtBytes(status.max_bytes)}
               </div>
-              <div style={styles.cardSub}>oldest non-critical records are evicted once max rows is exceeded</div>
+              <div style={styles.cardSub}>oldest unsent readings are evicted once full</div>
             </div>
 
             <div style={styles.card}>
@@ -114,11 +119,11 @@ export function StoreForwardPage() {
             <table style={{ ...styles.table, tableLayout: 'fixed' }}>
               <tbody>
                 <tr>
-                  <td style={{ ...styles.td, color: '#6B6580', width: 260 }}>Oldest Pending Record</td>
+                  <td style={{ ...styles.td, color: '#6B6580', width: 260 }}>Oldest Pending Reading</td>
                   <td style={styles.td}>{fmtTime(status.oldest_pending)}</td>
                 </tr>
                 <tr>
-                  <td style={{ ...styles.td, color: '#6B6580', width: 260 }}>Newest Pending Record</td>
+                  <td style={{ ...styles.td, color: '#6B6580', width: 260 }}>Newest Pending Reading</td>
                   <td style={styles.td}>{fmtTime(status.newest_pending)}</td>
                 </tr>
                 <tr>

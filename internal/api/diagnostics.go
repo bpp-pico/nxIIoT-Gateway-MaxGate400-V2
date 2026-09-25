@@ -28,10 +28,6 @@ func (s *Server) getDiagnostics(w http.ResponseWriter, r *http.Request) {
 		dto.CRCErrorCount = snap.CRCErrorCount
 		dto.RetryCount = snap.RetryCount
 	}
-	if rate, err := s.queueWriteRatePerSec(r.Context()); err == nil {
-		dto.WriteRatePerSec = rate
-	} else {
-		s.log.Warn("failed to compute queue write rate", "error", err)
-	}
+	dto.WriteRatePerSec = s.queueWriteRatePerSec()
 	writeJSON(w, http.StatusOK, dto)
 }

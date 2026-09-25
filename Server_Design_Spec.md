@@ -1,24 +1,27 @@
-# Server Design Spec — nxIIoT Gateway Ingestion API
+# Server Design Spec — nxIIoT Gateway Ingestion API (V2)
 
-Audience: the team building the **Internal Server** (the downstream system that receives sensor data from nxIIoT Gateway devices). This document specifies everything the server side must implement to correctly receive, acknowledge, and de-duplicate data from the gateway. It does not cover the gateway's internal architecture — only the wire contract between gateway and server.
+Audience: the team building the **Internal Server**, the downstream system that receives sensor data from nxIIoT Gateway devices. This document specifies what the server must implement to receive, acknowledge and de-duplicate data from a **V2** gateway. It covers only the wire contract between gateway and server, not the gateway's internals.
 
-A reference implementation of everything in this document (both transports) exists at `cmd/server-sim/main.go` in the gateway repo — it is a minimal but fully correct example of the required server behavior, used for the gateway's own local testing.
+A reference implementation of the server side (both transports) is `cmd/server-sim/main.go` in the gateway repo. It is minimal but correct, and the gateway's own tests run against it.
+
+> **V2 is not compatible with V1.** The payload, the ack and the de-duplication key all changed (see §11). A server must be updated before V2 gateways are switched on. V1 and V2 gateways can share a broker while they are being migrated; §11 describes how to tell their messages apart.
 
 ## 1. Architecture summary
 
-- Each gateway device polls its local Modbus (RTU/TCP) sensors continuously and persists every reading to a local, durable queue (SQLite) **before** attempting to send it anywhere. This happens regardless of whether the server is reachable.
-- A separate process on the gateway drains that local queue and delivers batches to the server, over **MQTT** (production/recommended) or **HTTP** (dev/test only — see §4).
-- Delivery is **at-least-once**. The gateway will retry a batch it isn't sure was accepted, so the same reading can arrive at the server more than once. **The server must de-duplicate** — this is not optional (see §6).
-- If the server is unreachable, the gateway does not stop collecting data — it keeps writing to its local queue and retries delivery once the server comes back. There is no data loss for the server to worry about on its side from a normal outage; the gateway's queue is the buffer.
+- Each gateway polls its Modbus (RTU/TCP) sensors continuously and stores **every reading** in a local, durable queue **before** trying to send it. This does not depend on the server being reachable.
+- Readings are stored in **chunks**: all readings from one ~2 second interval form one chunk. Each chunk gets a sequence number `seq`, which only increases.
+- A separate loop on the gateway sends the oldest unacknowledged chunks to the server, **one message at a time**. One message contains one or more whole chunks. The transport is **MQTT** in production, or **HTTP** for dev/test only (see §4).
+- Delivery is **at-least-once**. If the gateway is not sure a message was accepted, it sends the same chunks again, so the server can receive the same chunk more than once. **The server must de-duplicate** (see §6). This is required, not optional.
+- If the server is unreachable, the gateway keeps collecting and resends everything once the server is back. The gateway's buffer holds months of data at typical rates (1 GiB by default). If the buffer does fill up, the gateway deletes its **oldest** unsent chunks. The server can detect this as a gap in `seq` (see §8).
 
 ## 2. Transports
 
 | Transport | Status | Use |
 |---|---|---|
-| MQTT | Production | Recommended, has application-level acknowledgement, TLS, retained connection |
-| HTTP | Dev/test only | Simple synchronous POST, **no authentication, no TLS support in the current gateway implementation** — do not use in production |
+| MQTT | Production | Recommended. Has an application-level ack, supports TLS, keeps a persistent connection. |
+| HTTP | Dev/test only | Synchronous POST. **No authentication and no TLS in the current gateway.** Do not use in production. |
 
-A given gateway is configured with exactly one transport at a time (not both simultaneously).
+Each gateway uses exactly one transport at a time.
 
 ## 3. MQTT contract (production)
 
@@ -27,154 +30,176 @@ A given gateway is configured with exactly one transport at a time (not both sim
 - **Data topic** (gateway → server): `gateway/{gateway_id}/data`
 - **Ack topic** (server → gateway): `gateway/{gateway_id}/ack`
 
-`{gateway_id}` is a free-form string identifying the specific gateway device (e.g. `GW002`, `MaxGate400`) — unique per deployed unit. There is no fixed format/pattern to validate against beyond "non-empty string".
+`{gateway_id}` is a free-form, non-empty string that is unique for each deployed unit (e.g. `GW002`). Both topic names can be overridden in each gateway's configuration. The defaults above are what you will normally see.
 
-**The server must subscribe to a wildcard**, not a single gateway's topic, since a real deployment has multiple gateways:
+**Subscribe to a wildcard**, `gateway/+/data`, not to one gateway's topic. A real deployment has many gateways.
 
-```
-gateway/+/data
-```
-
-**The server must never hardcode a gateway_id when publishing an ack.** Derive the ack topic from the data topic the batch arrived on:
+**Never hardcode a gateway_id when publishing an ack.** Derive the ack topic from the topic the message arrived on:
 
 ```
 ack_topic = strip_suffix(received_topic, "/data") + "/ack"
 ```
 
-This is the only correct way to compute it — do not assume the ack topic is your own single fixed string, and do not reconstruct it from the `gateway_id` field inside the message body (always derive it from the MQTT topic string itself).
+Always derive it from the MQTT topic string, not from the `gateway_id` field in the body.
 
 ### 3.2 QoS
 
-Both the data publish and the ack publish use **QoS 1** (at-least-once at the MQTT transport level). Note QoS 1 only guarantees the *broker* received the message — it says nothing about whether your server *processed* it. That is exactly why the application-level ack below exists as a separate mechanism on top of QoS 1.
+The data publish and the ack publish both use **QoS 1**. QoS 1 only confirms that the *broker* received the message, not that your server *stored* it. That is why the application-level ack in §3.4 exists on top of QoS 1.
 
-### 3.3 Message envelope (data topic)
+### 3.3 Message (data topic)
 
 ```json
 {
-  "batch_id": "b3f1c2a4-...-uuid",
-  "entries": [
+  "gateway_id": "GW002",
+  "stream_id": "27d6d206-800e-4b76-ac46-32eb4bb327d6",
+  "from_seq": 481,
+  "to_seq": 482,
+  "chunks": [
     {
-      "gateway_id": "GW002",
-      "sequence_id": 481923,
-      "device_id": 3,
-      "datapoint_id": 17,
-      "value": 231.4,
-      "quality": "GOOD",
-      "event_timestamp": "2026-09-09T08:22:41.795123456Z",
-      "priority": "NORMAL"
+      "seq": 481,
+      "readings": [
+        { "device_id": 3, "datapoint_id": 17, "ts": "2026-09-25T08:44:46.336Z", "value": 231.4, "quality": "GOOD" },
+        { "device_id": 3, "datapoint_id": 18, "ts": "2026-09-25T08:44:46.336Z", "value": null,  "quality": "TIMEOUT" }
+      ]
+    },
+    {
+      "seq": 482,
+      "readings": [ ... ]
     }
   ]
 }
 ```
 
-- `batch_id`: a UUID (v4-style string) generated fresh by the gateway for every publish attempt — including retries of the same underlying data. **Do not use `batch_id` for de-duplication of the underlying readings** — a retried batch gets a *new* `batch_id` each attempt even though its entries may be identical to a previous attempt. `batch_id` exists solely to correlate a publish with its ack (see §3.4). Real de-duplication is per-entry, keyed on `gateway_id` + `sequence_id` (§6).
-- `entries`: an array of 1 or more readings (see §5 for field reference). Batch size is configurable on the gateway (default up to 100 entries per batch, tunable — do not assume a fixed maximum, but design to comfortably handle at least a few hundred entries in one message).
+| Field | Type | Notes |
+|---|---|---|
+| `gateway_id` | string | The sending gateway. |
+| `stream_id` | string (UUID) | Identifies the gateway's local queue file. It stays the same across gateway restarts. It changes only if the queue is recreated (for example, the file was deleted or the device was reflashed), and `seq` then starts again at 1. This is why `seq` alone is **not** a unique key. |
+| `from_seq`, `to_seq` | integer (int64) | `seq` of the first and last chunk in `chunks`. `to_seq` is the value to echo in the ack. |
+| `chunks` | array, at least 1 | Whole chunks in increasing `seq` order. `seq` inside one message is normally contiguous, but do not rely on it. |
+| `chunks[].seq` | integer (int64) | Chunk sequence number. It only increases within a `stream_id` and is never reused. |
+| `chunks[].readings` | array, at least 1 | The readings stored in that chunk; see §5. |
 
-### 3.4 Ack envelope (ack topic)
+Message size: the gateway adds whole chunks until it reaches about 2,000 readings (configurable), so one message can be somewhat larger than that. Under normal load a message holds one chunk (~25 readings). While catching up after an outage, messages are close to the limit, at roughly 100–200 KB of JSON. Make sure your broker's maximum message size allows at least 1 MB.
+
+### 3.4 Ack (ack topic)
 
 On success:
 
 ```json
-{ "batch_id": "b3f1c2a4-...-uuid" }
+{ "stream_id": "27d6d206-800e-4b76-ac46-32eb4bb327d6", "to_seq": 482 }
 ```
 
-On failure/rejection (rare — for a genuine processing error on the server's side, not "duplicate", see below):
+On a genuine processing failure:
 
 ```json
-{ "batch_id": "b3f1c2a4-...-uuid", "error": "human-readable reason" }
+{ "stream_id": "27d6d206-...", "to_seq": 482, "error": "human-readable reason" }
 ```
 
-- The server must publish exactly one ack per batch it receives on the data topic, using the `batch_id` from that batch, to the ack topic derived per §3.1.
-- **A duplicate batch (already-seen entries) is still a success from the ack's point of view.** Deduplicating an entry is not an error condition — ack normally (empty/no `error` field) even if every entry in the batch turned out to be a duplicate you already had. The gateway does not need or want to know which entries were duplicates; only whether the batch was accepted.
-- Only report `error` for a genuine processing failure (e.g. malformed payload, a downstream dependency you need is down, etc.) — the gateway treats an ack with `error` set the same as never receiving an ack at all: the whole batch goes back to pending and will be retried later (see §7). If your error is really about "some entries look invalid," still ack success for the batch as a whole unless the entire batch is genuinely unusable — over-reporting errors just causes needless retries and does not give you a way to communicate per-entry problems anyway (the ack has no per-entry structure).
+- Publish **exactly one ack per message**, **after** the message's chunks are stored durably, to the ack topic derived as in §3.1.
+- `to_seq` must be the message's `to_seq`; the gateway matches the ack on it. `stream_id` is optional but recommended; if it is present, it must match the message.
+- **A message whose chunks you already have is still a success.** De-duplication is not an error. Ack normally, without an `error` field.
+- Set `error` only when you cannot store the message at all (for example, the payload is malformed or your database is down). The gateway treats an `error` ack the same as no ack: after a backoff it sends the same chunks again (§7). The ack has no per-reading structure, so there is no way to reject individual readings. Store what is usable and ack success.
 
 ### 3.5 Timing
 
-The gateway waits up to a configurable timeout (default **10 seconds**) after publishing for the corresponding ack to arrive. If your server cannot process and ack within that window under normal load, batches will start timing out and being retried (redundant work, not data loss — retries are idempotent per §6, but avoid it for efficiency). Ack promptly; do heavy processing asynchronously after acking if needed, as long as you're confident you've durably captured the batch before acking.
+After publishing, the gateway waits up to **10 seconds** (configurable) for the ack. If you are slower than that, the gateway resends. This is wasted work, not data loss, because of §6. Ack as soon as the data is stored durably, and do any heavy processing afterwards.
+
+The gateway sends **one message at a time**: the next message goes out only after the previous one has been acked. A slow ack therefore also slows down the catch-up after an outage.
 
 ### 3.6 Connection / client ID
 
-- The gateway's MQTT client ID defaults to its `gateway_id`. Most brokers enforce "last connection wins" per client ID — **do not** connect your own server-side tooling (debugging, test clients) using the same client ID as a live gateway, or you will kick the real device offline.
-- The gateway auto-reconnects on its own (both via the MQTT client library's built-in retry and a gateway-side watchdog that forces a reconnect if the built-in retry ever silently stalls). You do not need to do anything special server-side to handle a gateway reconnecting — just keep your subscription live; the broker will keep delivering to it.
+- The gateway's MQTT client ID defaults to its `gateway_id`. Most brokers enforce "last connection wins" per client ID, so **do not** connect your own tools with a live gateway's client ID, or you will disconnect the real device.
+- The gateway reconnects on its own. Server-side, just keep your subscription alive.
 
 ### 3.7 Authentication / TLS
 
-Both are supported by the gateway and are configured per-deployment, so your broker/server setup should be prepared to offer whichever the operator configures:
+The gateway supports both, and each deployment configures them:
 
-- **Username/password**: plain MQTT username+password auth, optional.
-- **TLS**: optional, with support for a custom CA file (for a private/internal CA), client certificate + key (mutual TLS), and an `insecure_skip_verify` escape hatch (should not be used in production — exists for lab/dev setups with self-signed certs).
+- **Username/password**: plain MQTT username and password. Optional.
+- **TLS**: optional. It supports a custom CA file, a client certificate and key (mutual TLS), and an `insecure_skip_verify` option. That option is for lab setups only and must not be used in production.
 
-There is no other auth mechanism (no token/JWT-over-MQTT, no API key) — access control is expected to be enforced at the broker level (ACLs on who may publish/subscribe to which `gateway/{id}/...` topics) plus TLS client certs if mutual auth is required.
+Access control belongs on the broker: ACLs on `gateway/{id}/...`, plus TLS client certificates if you need mutual authentication.
 
 ## 4. HTTP contract (dev/test only)
 
-Used only for local development and testing (`cmd/server-sim`'s `/ingest` endpoint is the reference). **Do not build production infrastructure around this transport** — it has no authentication and no TLS in the current gateway implementation (an HTTPS adapter is on the gateway's roadmap but not built yet).
+`cmd/server-sim`'s `/ingest` endpoint is the reference. **Do not build production infrastructure on this transport.** It has no authentication and no TLS.
 
-- The gateway `POST`s to a single configured URL.
-- Body: a **plain JSON array** of entries (not wrapped in a `{batch_id, entries}` envelope — that envelope is MQTT-specific, used there to correlate with the ack topic). Same entry shape as §5.
-- Success: any 2xx HTTP status code. The gateway does not read the response body.
-- Failure: any non-2xx status, a connection error, or a timeout — treated as a failed send and retried (§7), same as an MQTT ack failure/timeout.
-- No ack round-trip — the HTTP response status *is* the acknowledgement. There is no separate "ack topic" concept for this transport.
-- De-duplication (§6) still applies — the same at-least-once/retry behavior holds for HTTP too.
+- The gateway sends a `POST` to one configured URL with `Content-Type: application/json`.
+- **The body is exactly the same Message as §3.3.** In V1 the body was a bare array; that is no longer the case.
+- Any 2xx status is the ack. The gateway does not read the response body.
+- A non-2xx status, a connection error or a timeout counts as a failed send, and the gateway resends after a backoff (§7).
+- De-duplication (§6) applies in the same way.
 
-## 5. Entry field reference
-
-Each entry (identical shape whether inside the MQTT envelope's `entries` array or the bare HTTP JSON array) represents one Modbus reading:
+## 5. Reading field reference
 
 | Field | Type | Notes |
 |---|---|---|
-| `gateway_id` | string | Identifies the sending gateway. Part of the idempotency key. |
-| `sequence_id` | integer (int64) | **Monotonically increasing per `gateway_id`**, assigned atomically at the moment the gateway persists the reading locally, and persisted across gateway restarts (never resets). This is the other half of the idempotency key. Not globally unique by itself — always use it together with `gateway_id`. |
-| `device_id` | integer (int64) | Identifies the physical device/sensor within the gateway's own configuration. Meaningful only in combination with `gateway_id` — device IDs are not globally unique across different gateways. |
-| `datapoint_id` | integer (int64) | Identifies the specific tag/register read from that device. Same caveat as `device_id` — scoped to the owning gateway. |
-| `value` | number or `null` | The decoded reading. **`null`** when the read failed (see `quality` below) — a failed read is still reported (not silently dropped), just with no value. |
-| `quality` | string enum | One of: `"GOOD"`, `"TIMEOUT"`, `"CRC_ERROR"`, `"DEVICE_OFFLINE"`, `"INVALID"`. Only `"GOOD"` should generally be treated as a trustworthy `value`; the others represent a failed/degraded read reported for observability, `value` will be `null` for these. |
-| `event_timestamp` | string, RFC3339 (nanosecond precision), UTC | When the reading was actually taken on the gateway (not when it was sent, and not when the server receives it — those can differ from this by anywhere from milliseconds to the full length of a server outage). Always use this field for time-series ordering/storage, not receipt time. |
-| `priority` | string enum | One of: `"CRITICAL"`, `"HIGH"`, `"NORMAL"`, `"LOW"`. Configured per-datapoint on the gateway; defaults to `"NORMAL"` if not explicitly set. Affects delivery *order* under backlog (§8) and which data the gateway's local storage-pressure policy protects first when its local disk/queue is under pressure — it does not require any special server-side handling beyond being stored/passed through faithfully.
+| `device_id` | integer (int64) | The device (sensor) in that gateway's own configuration. It is only meaningful together with `gateway_id`. |
+| `datapoint_id` | integer (int64) | The tag/register read from that device. Same scope as `device_id`. |
+| `ts` | string, RFC 3339, UTC, millisecond precision (e.g. `2026-09-25T08:44:46.336Z`) | When the gateway **took** the reading. It is not when the message was sent or received, which can be later by as long as an outage lasted. Use `ts` for all time-series storage and ordering. |
+| `value` | number or `null` | The decoded value. It is `null` whenever `quality` is not `GOOD`. |
+| `quality` | string | One of `GOOD`, `TIMEOUT`, `CRC_ERROR`, `DEVICE_OFFLINE`, `INVALID`. Only `GOOD` carries a trustworthy value. The others are failed reads that are reported for observability. Accept and store unknown values rather than rejecting them. |
 
-## 6. Idempotency & de-duplication (critical — required, not optional)
+Readings no longer carry `gateway_id`, `sequence_id`, `event_timestamp` or `priority`; see §11. **Every** reading is sent: the gateway does not filter or deduplicate values that did not change.
 
-Because delivery is at-least-once, **the same entry can and will arrive more than once** under normal operation (a network blip after publish but before ack, a timeout that was actually a slow-but-successful ack, a gateway restart mid-delivery, etc.).
+## 6. Idempotency and de-duplication (required)
 
-**The de-duplication key is `(gateway_id, sequence_id)`.** Two entries with the same pair represent the same reading — keep the first, discard/ignore the rest, and still ack success (§3.4).
+Under normal operation the same chunk **will** sometimes arrive more than once. Causes include a network blip after the publish but before the ack, an ack that arrived after the timeout, or a gateway restart in the middle of a send.
 
-Minimal reference approach (see `cmd/server-sim/main.go`'s `store.ingest` for a working example): maintain a lookup keyed on `(gateway_id, sequence_id)`; for each incoming entry, check-and-insert; only entries that were newly inserted are "new" data to actually process/store/forward downstream. This must be durable (survive a server restart) in any real production implementation — an in-memory-only dedup table, as in the dev reference implementation, is not sufficient for production since a server restart would forget what it had already seen and cause a spike of reprocessed duplicates on the next few batches after any outage. A unique constraint on `(gateway_id, sequence_id)` in whatever the server's own persistent store is (with an ON CONFLICT-do-nothing / equivalent upsert) is the recommended pattern.
+**The de-duplication key is `(gateway_id, stream_id, seq)`, per chunk.** A chunk with a key you have already stored is identical to what you have, so skip it and still ack success. Keep the dedup record durable (for example, a unique constraint on those three columns plus insert-or-ignore). An in-memory table, as in the reference server, forgets everything on a restart.
 
-Do **not** attempt to de-duplicate on `batch_id` — as noted in §3.3, a retried batch gets a new `batch_id` each time even for identical underlying entries.
+The chunk is the unit of de-duplication. If you store readings one row per reading, you can use `(gateway_id, stream_id, seq, index within the chunk)` as the reading's key. The gateway never changes a chunk's contents once it has been written, so the index is stable across resends.
 
-## 7. Delivery / retry behavior (what the gateway does — informs your timeout/error design)
+## 7. Delivery and retry behaviour
 
-- A batch is considered failed by the gateway if: the publish itself fails, the ack never arrives within the ack timeout (default 10s, §3.5), or the ack arrives with `error` set.
-- On failure, the whole batch's entries go back to pending and are retried later with **exponential backoff**: 1s, 2s, 4s, 8s, 16s, 32s, then capped at 60s between attempts, per-entry (based on that entry's own individual retry count, so a batch can be reassembled from entries at different points in their own backoff schedules on a later attempt).
-- Retries are not necessarily against the exact same batch grouping as the failed attempt — pending entries are re-batched each attempt.
-- There is no maximum retry count / give-up point — the gateway keeps retrying indefinitely as long as the entry hasn't been acked. If your server is down for an extended period, expect a burst of catch-up traffic when it comes back, sized according to how much backlog accumulated (bounded by the gateway's local queue capacity, which is large — hundreds of thousands of rows by default).
+The gateway treats a send as failed if:
+- the publish fails,
+- no ack arrives within the timeout (§3.5), or
+- the ack contains `error`.
 
-## 8. Delivery ordering
+After a failure:
+- It waits **1, 2, 4, 8, 16, 32 s, then 60 s** between further attempts and resends the same oldest chunks. The grouping into messages can differ between attempts.
+- There is no maximum number of retries. Unacknowledged data is resent until it is acked, or until the gateway evicts it because its buffer is full (§8).
+- Once the server is back, expect a catch-up burst: messages sent back to back, each close to the size limit in §3.3, until the backlog is gone.
 
-Within a gateway's backlog, the gateway dispatches in this order: **priority first** (`CRITICAL` → `HIGH` → `NORMAL` → `LOW`), then **oldest first** (by `sequence_id`) within the same priority tier. This means:
+## 8. Ordering and gaps
 
-- Under normal (non-backlogged) operation, entries arrive in roughly real-time order.
-- Under a large backlog (e.g. after a long outage), you may receive a `CRITICAL` entry with a *later* `event_timestamp` before a `LOW`-priority entry with an *earlier* `event_timestamp` from the same gateway. **Do not assume received order equals chronological order** — always sort/key by `event_timestamp` (or `sequence_id` within a single `gateway_id`) for anything that depends on strict ordering, never by arrival order.
-- Across different gateways there is no ordering guarantee or relationship at all — `sequence_id` is only meaningful scoped to its own `gateway_id`.
+- The gateway sends chunks in **increasing `seq` order** within a stream, and a later message never starts below an earlier message's `to_seq`, except when the same chunks are resent after a failure.
+- **A gap in `seq` within one `stream_id`** means the gateway's buffer filled up and it deleted those chunks before they could be sent. That data is lost. Consider logging or alerting on gaps; the reference server logs them.
+- **Readings inside a chunk are only roughly in time order**, because devices on different connections are polled concurrently. Always order by `ts`, never by arrival order or by position.
+- Across gateways there is no ordering relationship at all.
 
 ## 9. Multi-gateway checklist
 
-A production server will be receiving from many gateways concurrently over the same broker/endpoint. Design for:
-
-- Subscribing to the wildcard data topic (`gateway/+/data`), not a fixed list of known gateway IDs (new gateways may be provisioned over time).
-- Deriving the ack topic per-message from the received topic (§3.1) — never a single shared/hardcoded ack topic.
-- Treating `(device_id, datapoint_id)` as meaningful only in combination with `gateway_id`, never as globally unique identifiers on their own.
-- Handling many gateways potentially reconnecting/catching-up around the same time (e.g. after a shared network segment or broker outage) — expect concurrent bursts across multiple `gateway_id`s, not just backlog from one.
+- Subscribe to the wildcard `gateway/+/data`. New gateways appear over time.
+- Derive each ack topic from the topic the message arrived on (§3.1).
+- Scope `device_id` and `datapoint_id` to their `gateway_id`; they are not globally unique.
+- Expect several gateways to catch up at the same time after a shared network or broker outage.
 
 ## 10. Implementation checklist
 
 - [ ] Subscribe to `gateway/+/data` at QoS 1
-- [ ] Parse the `{batch_id, entries[]}` envelope
-- [ ] De-duplicate every entry on `(gateway_id, sequence_id)` against durable storage
-- [ ] Derive the ack topic from the received topic (`.../data` → `.../ack`), never hardcode it
-- [ ] Publish `{"batch_id": "..."}` at QoS 1 once the batch is durably captured (dedup applied, persisted) — ack success even for all-duplicate batches
-- [ ] Only set `error` in the ack for genuine processing failures, and understand that doing so triggers a full-batch retry from the gateway
-- [ ] Sort/process by `event_timestamp` (or `sequence_id` within a `gateway_id`), never by arrival order
-- [ ] Support TLS (custom CA / mutual TLS) and username+password auth on the broker side if the deployment requires them
-- [ ] Load-test for backlog catch-up bursts (a gateway or broker outage of length T followed by recovery can deliver T-seconds'-worth of backlog in a short burst once reconnected)
-- [ ] If an HTTP fallback is ever needed for a specific site: implement the same de-duplication logic against the bare JSON array on your ingest endpoint, understanding this path currently has no authentication or TLS on the gateway side — treat it as trusted-network-only, not for anything internet-facing
+- [ ] Parse the Message (§3.3) and every chunk's readings (§5)
+- [ ] De-duplicate chunks on `(gateway_id, stream_id, seq)` against durable storage
+- [ ] Store readings keyed and ordered by `ts`
+- [ ] Publish `{"stream_id": ..., "to_seq": ...}` at QoS 1 to the derived ack topic, **after** storing, including when every chunk was a duplicate
+- [ ] Set `error` only when the message cannot be stored at all
+- [ ] Log or alert on `seq` gaps within a stream (data evicted on the gateway)
+- [ ] Allow MQTT messages of at least 1 MB
+- [ ] Support TLS (custom CA / mutual TLS) and username/password on the broker if the deployment needs them
+- [ ] Load-test catch-up after an outage (back-to-back ~2,000-reading messages from several gateways)
+
+## 11. Changes from V1
+
+| | V1 | V2 |
+|---|---|---|
+| Data message | `{"batch_id", "entries": [...]}`, one entry per reading | `{"gateway_id", "stream_id", "from_seq", "to_seq", "chunks": [{"seq", "readings": [...]}]}` |
+| HTTP body | bare JSON array of entries | the same Message as MQTT |
+| Ack | `{"batch_id", "error"?}` | `{"stream_id"?, "to_seq", "error"?}` |
+| De-duplication key | `(gateway_id, sequence_id)` per reading | `(gateway_id, stream_id, seq)` per chunk |
+| Reading fields | `gateway_id`, `sequence_id`, `device_id`, `datapoint_id`, `value`, `quality`, `event_timestamp` (ns), `priority` | `device_id`, `datapoint_id`, `ts` (ms), `value`, `quality` |
+| Priority | `CRITICAL`…`LOW`, affected send order | removed |
+| Order | priority first, then oldest | oldest first (`seq`) |
+| Data loss visible to server | not visible | gap in `seq` |
+
+**Telling V1 and V2 apart on a shared broker:** a V2 message has a `chunks` array, and a V1 message has `entries` and `batch_id`. While both are deployed, a server can accept both formats by checking for these fields and answering each with the matching ack format.

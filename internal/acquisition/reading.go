@@ -18,6 +18,5 @@ type Reading struct {
 	Value          *float64
 	Quality        modbus.Quality
 	Unit           string
-	Priority       string
 	EventTimestamp time.Time
 }

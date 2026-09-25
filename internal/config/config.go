@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,7 +26,7 @@ type Config struct {
 // pipeline (Rule 1's queue+forwarder half). Disabled puts the gateway into
 // "Modbus read-only" mode: acquisition keeps polling and readings still
 // show up live (status/logs), but processor.Process is never called (so
-// nothing is written to data_queue) and the Forwarder never starts (so no
+// nothing is queued) and the Forwarder never starts (so no
 // MQTT/HTTP connection is attempted at all - see cmd/gateway/adapter.go's
 // fatal-on-MQTT-connect-failure behavior, which this also sidesteps).
 // Field is named Disabled (not Enabled) so the zero value - what any
@@ -54,36 +55,37 @@ type DatabaseConfig struct {
 	Path string `yaml:"path"`
 }
 
-// QueueConfig controls capacity and storage-pressure handling of the
-// persistent data_queue (§9, §17). Two independent caps, both enforced by
-// evicting oldest non-critical rows first (EvictOldestNonCritical), never
-// deleting CRITICAL data:
-//   - MaxRows caps the queue directly, "keep at most N rows, overwrite the
-//     oldest once full" — a ring-buffer-style bound on data_queue itself,
-//     regardless of what else shares the disk.
-//   - StorageFullPercent is a separate, disk-wide safety net (other files
-//     on the same volume — logs, other apps — can also fill the disk even
-//     if MaxRows is never reached).
+// QueueConfig controls the Store & Forward buffer (internal/queue), a
+// SQLite file of its own separate from database.path. Two caps, both
+// enforced by evicting the oldest chunks — sent or not — first:
+//   - MaxBytes caps queue.db itself (default 1 GiB).
+//   - MinFreePercent keeps that much of the queue's volume free whatever
+//     else is filling it (default 10); SQLite cannot even delete once the
+//     disk is completely full (MEMORY.md 2026-09-11).
 //
-// EvictBatchSize is shared by both sweepers — it's just "how many rows to
-// delete per eviction pass", not specific to either policy.
+// V1's max_rows / max_rows_sweep_interval_seconds / storage_full_percent /
+// storage_sweep_interval_seconds / evict_batch_size are gone; yaml ignores
+// them if an old config.yaml still has them.
 type QueueConfig struct {
-	MaxRows              int     `yaml:"max_rows"`
-	MaxRowsSweepInterval int     `yaml:"max_rows_sweep_interval_seconds"`
-	StorageFullPercent   float64 `yaml:"storage_full_percent"`
-	StorageSweepInterval int     `yaml:"storage_sweep_interval_seconds"`
-	EvictBatchSize       int     `yaml:"evict_batch_size"`
+	// Path defaults to queue.db next to database.path.
+	Path                   string  `yaml:"path"`
+	MaxBytes               int64   `yaml:"max_bytes"`
+	MinFreePercent         float64 `yaml:"min_free_percent"`
+	FlushIntervalMs        int     `yaml:"flush_interval_ms"`
+	MaintenanceIntervalSec int     `yaml:"maintenance_interval_seconds"`
 }
 
 // ForwarderConfig controls Store & Forward (§9). Transport selects which
 // Adapter main.go wires up: "http" targets the dev/test adapter
 // (cmd/server-sim, ServerURL); "mqtt" targets MQTTAdapter (see MQTTConfig).
 type ForwarderConfig struct {
-	Transport      string `yaml:"transport"`
-	ServerURL      string `yaml:"server_url"`
-	BatchSize      int    `yaml:"batch_size"`
-	PollIntervalMs int    `yaml:"poll_interval_ms"`
-	SendTimeoutMs  int    `yaml:"send_timeout_ms"`
+	Transport string `yaml:"transport"`
+	ServerURL string `yaml:"server_url"`
+	// MaxReadingsPerMessage caps one message (whole chunks are added until
+	// it is reached). Replaces V1's batch_size.
+	MaxReadingsPerMessage int `yaml:"max_readings_per_message"`
+	PollIntervalMs        int `yaml:"poll_interval_ms"`
+	SendTimeoutMs         int `yaml:"send_timeout_ms"`
 }
 
 type LogConfig struct {
@@ -183,27 +185,26 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	if cfg.Queue.MaxRows <= 0 {
-		// 500,000 rows (~130MB at the ~265 bytes/row observed during the
-		// 2026-09-07 incident, MEMORY.md) — well below the SD-card pressure
-		// that incident hit at ~4.9M rows/1.3GB. Deliberately conservative;
-		// tune via queue.max_rows for a given device's actual free space.
-		cfg.Queue.MaxRows = 500_000
+	if cfg.Queue.Path == "" {
+		cfg.Queue.Path = filepath.Join(filepath.Dir(cfg.Database.Path), "queue.db")
 	}
-	if cfg.Queue.MaxRowsSweepInterval <= 0 {
-		cfg.Queue.MaxRowsSweepInterval = 60
+	if cfg.Queue.MaxBytes <= 0 {
+		// 1 GiB (user decision 2026-09-25): at the ~9 B/reading measured for
+		// the chunk format that is months of buffer at the device's
+		// ~12.5 readings/s, and leaves room on its 1.6 GB /userdata.
+		cfg.Queue.MaxBytes = 1 << 30
 	}
-	if cfg.Queue.StorageFullPercent <= 0 {
-		cfg.Queue.StorageFullPercent = 95
+	if cfg.Queue.MinFreePercent <= 0 {
+		cfg.Queue.MinFreePercent = 10
 	}
-	if cfg.Queue.StorageSweepInterval <= 0 {
-		cfg.Queue.StorageSweepInterval = 60
+	if cfg.Queue.FlushIntervalMs <= 0 {
+		cfg.Queue.FlushIntervalMs = 2000
 	}
-	if cfg.Queue.EvictBatchSize <= 0 {
-		cfg.Queue.EvictBatchSize = 100
+	if cfg.Queue.MaintenanceIntervalSec <= 0 {
+		cfg.Queue.MaintenanceIntervalSec = 30
 	}
-	if cfg.Forwarder.BatchSize <= 0 {
-		cfg.Forwarder.BatchSize = 100
+	if cfg.Forwarder.MaxReadingsPerMessage <= 0 {
+		cfg.Forwarder.MaxReadingsPerMessage = 2000
 	}
 	if cfg.Forwarder.PollIntervalMs <= 0 {
 		cfg.Forwarder.PollIntervalMs = 1000

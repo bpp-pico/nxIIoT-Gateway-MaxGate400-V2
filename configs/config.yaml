@@ -9,16 +9,16 @@ database:
   path: "./data/gateway.db"
 
 queue:
-  max_rows: 500000 # cap on data_queue itself; oldest non-critical rows are evicted first once exceeded
-  max_rows_sweep_interval_seconds: 60
-  storage_full_percent: 95
-  storage_sweep_interval_seconds: 60
-  evict_batch_size: 100
+  # path: "./data/queue.db" # default: queue.db next to database.path
+  max_bytes: 1073741824 # 1 GiB cap on queue.db; the oldest data is evicted above it
+  min_free_percent: 10 # keep this much of the volume free; the oldest data is evicted below it
+  flush_interval_ms: 2000 # readings are written as one compressed chunk per interval (the most lost on power failure)
+  maintenance_interval_seconds: 30
 
 forwarder:
   transport: "http" # "http" (dev/test, cmd/server-sim) or "mqtt"
   server_url: "http://localhost:9000/ingest"
-  batch_size: 100
+  max_readings_per_message: 2000
   poll_interval_ms: 1000
   send_timeout_ms: 5000
 

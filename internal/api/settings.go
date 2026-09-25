@@ -46,19 +46,14 @@ type settingsDTO struct {
 		SyncIntervalSec int    `json:"sync_interval_seconds"`
 	} `json:"time"`
 	Queue struct {
-		MaxRows int `json:"max_rows"`
-		// EvictBatchSize is how many oldest non-critical rows each eviction
-		// pass removes once max_rows is exceeded (queue.RunMaxRowsSweeper) -
-		// shared with the disk-percent sweeper. Must be large enough that
-		// eviction throughput (EvictBatchSize / max_rows_sweep_interval_seconds,
-		// the latter file-only) keeps pace with real acquisition write rate,
-		// or the queue keeps growing past max_rows regardless of eviction
-		// running correctly (found live 2026-09-09, see MEMORY.md).
-		EvictBatchSize int `json:"evict_batch_size"`
+		// MaxBytes caps queue.db; MinFreePercent is the free space kept on
+		// its volume. Either limit evicts the oldest queued data.
+		MaxBytes       int64   `json:"max_bytes"`
+		MinFreePercent float64 `json:"min_free_percent"`
 	} `json:"queue"`
 	// StoreForward is the master switch for the whole pipeline (see
 	// config.StoreForwardConfig) - when Enabled is false, the gateway only
-	// polls Modbus; nothing is persisted to data_queue or sent anywhere.
+	// polls Modbus; nothing is queued or sent anywhere.
 	StoreForward struct {
 		Enabled bool `json:"enabled"`
 	} `json:"store_forward"`
@@ -189,8 +184,8 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	dto.Time.NTPServer = s.cfg.Time.NTPServer
 	dto.Time.Timezone = s.cfg.Time.Timezone
 	dto.Time.SyncIntervalSec = s.cfg.Time.SyncIntervalSec
-	dto.Queue.MaxRows = s.cfg.Queue.MaxRows
-	dto.Queue.EvictBatchSize = s.cfg.Queue.EvictBatchSize
+	dto.Queue.MaxBytes = s.cfg.Queue.MaxBytes
+	dto.Queue.MinFreePercent = s.cfg.Queue.MinFreePercent
 	dto.StoreForward.Enabled = !s.cfg.StoreForward.Disabled
 	writeJSON(w, http.StatusOK, dto)
 }
@@ -290,11 +285,11 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if dto.Time.SyncIntervalSec > 0 {
 		s.cfg.Time.SyncIntervalSec = dto.Time.SyncIntervalSec
 	}
-	if dto.Queue.MaxRows > 0 {
-		s.cfg.Queue.MaxRows = dto.Queue.MaxRows
+	if dto.Queue.MaxBytes > 0 {
+		s.cfg.Queue.MaxBytes = dto.Queue.MaxBytes
 	}
-	if dto.Queue.EvictBatchSize > 0 {
-		s.cfg.Queue.EvictBatchSize = dto.Queue.EvictBatchSize
+	if dto.Queue.MinFreePercent > 0 {
+		s.cfg.Queue.MinFreePercent = dto.Queue.MinFreePercent
 	}
 
 	if s.configPath == "" {

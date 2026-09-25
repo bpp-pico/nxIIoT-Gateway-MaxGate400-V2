@@ -4,6 +4,8 @@ import { styles } from '../styles'
 import { Icon } from '../icons'
 import type { ConfigImportResult, NetworkStatus, Settings } from '../types'
 
+const MiB = 1024 * 1024
+
 // The gateway only stores/echoes this string (see internal/time/service.go)
 // — it does not currently drive any real timezone-aware conversion, the
 // gateway operates in UTC internally regardless of this value. A dropdown
@@ -56,13 +58,13 @@ function SettingsSection() {
   useEffect(() => {
     api
       .getSettings()
-      // Default queue.max_rows/evict_batch_size when talking to an older
-      // gateway build that doesn't send them yet, so the form always has a
-      // value to show.
+      // Default queue.max_bytes/min_free_percent (the gateway's own
+      // defaults) when talking to a build that doesn't send them, so the
+      // form always has a value to show.
       .then((s) =>
         setSettings({
           ...s,
-          queue: { max_rows: 500000, evict_batch_size: 100, ...s.queue },
+          queue: { max_bytes: 1024 * MiB, min_free_percent: 10, ...s.queue },
           mqtt: { ...s.mqtt, transport: s.mqtt.transport ?? 'mqtt' },
           store_forward: s.store_forward ?? { enabled: true },
         }),
@@ -281,35 +283,37 @@ function SettingsSection() {
         <div style={styles.card}>
           <div style={styles.cardTitle}>Store &amp; Forward</div>
           <div style={styles.formRow}>
-            <label style={styles.label}>Max Queue Size (rows)</label>
+            <label style={styles.label}>Max Queue Size (MiB)</label>
             <input
               type="number"
               min={1}
               style={styles.input}
-              value={settings.queue.max_rows}
-              onChange={(e) => setSettings({ ...settings, queue: { ...settings.queue, max_rows: Number(e.target.value) } })}
-            />
-          </div>
-          <p style={{ ...styles.muted, marginTop: '0.35rem', marginBottom: 0 }}>
-            Maximum rows kept in the local database. Once exceeded, the oldest non-critical readings are deleted
-            first to make room (CRITICAL-priority data is never evicted this way).
-          </p>
-          <div style={{ ...styles.formRow, marginTop: '0.75rem' }}>
-            <label style={styles.label}>Eviction Batch Size</label>
-            <input
-              type="number"
-              min={1}
-              style={styles.input}
-              value={settings.queue.evict_batch_size}
+              value={Math.round(settings.queue.max_bytes / MiB)}
               onChange={(e) =>
-                setSettings({ ...settings, queue: { ...settings.queue, evict_batch_size: Number(e.target.value) } })
+                setSettings({ ...settings, queue: { ...settings.queue, max_bytes: Number(e.target.value) * MiB } })
               }
             />
           </div>
           <p style={{ ...styles.muted, marginTop: '0.35rem', marginBottom: 0 }}>
-            How many rows are deleted per eviction pass once Max Queue Size is exceeded. Must be large enough to
-            keep pace with the actual write rate (see the Queue Write Rate on the Dashboard/Diagnostics pages) —
-            too low and the queue keeps growing past Max Queue Size even though eviction is running correctly.
+            Size cap for the local queue file. Readings wait there until the server acknowledges them; once the
+            cap is reached the oldest unsent readings are deleted to make room.
+          </p>
+          <div style={{ ...styles.formRow, marginTop: '0.75rem' }}>
+            <label style={styles.label}>Minimum Free Disk Space (%)</label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              style={styles.input}
+              value={settings.queue.min_free_percent}
+              onChange={(e) =>
+                setSettings({ ...settings, queue: { ...settings.queue, min_free_percent: Number(e.target.value) } })
+              }
+            />
+          </div>
+          <p style={{ ...styles.muted, marginTop: '0.35rem', marginBottom: 0 }}>
+            Space always kept free on the queue's disk, whatever else is using it. Below this the oldest queued
+            readings are deleted too — a completely full disk would stop the gateway from storing anything.
           </p>
         </div>
       </div>

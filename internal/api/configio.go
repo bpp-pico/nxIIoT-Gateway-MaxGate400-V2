@@ -11,11 +11,11 @@ import (
 // process's static config.yaml settings — see importConfig for why only
 // Devices/DataPoints actually get restored.
 type forwarderExportDTO struct {
-	Transport      string `json:"transport"`
-	ServerURL      string `json:"server_url,omitempty"`
-	BatchSize      int    `json:"batch_size"`
-	PollIntervalMs int    `json:"poll_interval_ms"`
-	SendTimeoutMs  int    `json:"send_timeout_ms"`
+	Transport             string `json:"transport"`
+	ServerURL             string `json:"server_url,omitempty"`
+	MaxReadingsPerMessage int    `json:"max_readings_per_message"`
+	PollIntervalMs        int    `json:"poll_interval_ms"`
+	SendTimeoutMs         int    `json:"send_timeout_ms"`
 }
 
 // mqttExportDTO deliberately omits Password (§18: "Do not include
@@ -79,11 +79,11 @@ func (s *Server) exportConfig(w http.ResponseWriter, r *http.Request) {
 		ExportedAt: time.Now().UTC(),
 		Gateway:    gatewayExportDTO{ID: s.cfg.Gateway.ID, Name: s.cfg.Gateway.Name},
 		Forwarder: forwarderExportDTO{
-			Transport:      s.cfg.Forwarder.Transport,
-			ServerURL:      s.cfg.Forwarder.ServerURL,
-			BatchSize:      s.cfg.Forwarder.BatchSize,
-			PollIntervalMs: s.cfg.Forwarder.PollIntervalMs,
-			SendTimeoutMs:  s.cfg.Forwarder.SendTimeoutMs,
+			Transport:             s.cfg.Forwarder.Transport,
+			ServerURL:             s.cfg.Forwarder.ServerURL,
+			MaxReadingsPerMessage: s.cfg.Forwarder.MaxReadingsPerMessage,
+			PollIntervalMs:        s.cfg.Forwarder.PollIntervalMs,
+			SendTimeoutMs:         s.cfg.Forwarder.SendTimeoutMs,
 		},
 		MQTT: mqttExportDTO{
 			BrokerURL:    s.cfg.MQTT.BrokerURL,

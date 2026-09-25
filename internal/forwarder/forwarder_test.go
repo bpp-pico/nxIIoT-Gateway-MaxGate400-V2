@@ -11,25 +11,30 @@ import (
 
 	"nxiiot-gateway/internal/forwarder"
 	"nxiiot-gateway/internal/queue"
-	"nxiiot-gateway/internal/storage"
 )
 
-func openTestRepo(t *testing.T) *queue.Repository {
+func openTestQueue(t *testing.T) *queue.Store {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	log := slog.New(slog.NewTextHandler(testWriter{t}, nil))
-
-	db, err := storage.Open(dbPath, "../../migrations", log)
+	s, err := queue.Open(filepath.Join(t.TempDir(), "queue.db"), queue.Options{}, newTestLogger(t))
 	if err != nil {
-		t.Fatalf("open storage: %v", err)
+		t.Fatalf("open queue: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { s.Close() })
+	return s
+}
 
-	repo := queue.NewRepository(db)
-	if err := repo.EnsureGateway(context.Background(), "GW001", "Test Gateway"); err != nil {
-		t.Fatalf("EnsureGateway: %v", err)
+// fill writes chunks x perChunk readings to the queue, one flush per chunk.
+func fill(t *testing.T, s *queue.Store, chunks, perChunk int) {
+	t.Helper()
+	v := 1.5
+	for c := 0; c < chunks; c++ {
+		for i := 0; i < perChunk; i++ {
+			s.Append(queue.Reading{DeviceID: 1, DatapointID: int64(i + 1), Value: &v, Quality: "GOOD", At: time.Now()})
+		}
+		if err := s.Flush(context.Background()); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
 	}
-	return repo
 }
 
 type testWriter struct{ t *testing.T }
@@ -40,158 +45,144 @@ func (w testWriter) Write(p []byte) (int, error) {
 }
 
 // fakeAdapter lets tests script success/failure per call and records every
-// batch it was asked to send.
+// message it was asked to send.
 type fakeAdapter struct {
-	mu      sync.Mutex
-	fail    func(callNum int) error // nil = always succeed
-	calls   int
-	batches [][]queue.DispatchEntry
+	mu   sync.Mutex
+	fail func(callNum int) error // nil = always succeed
+	msgs []forwarder.Message
 }
 
-func (a *fakeAdapter) Send(ctx context.Context, batch []queue.DispatchEntry) error {
+func (a *fakeAdapter) Send(ctx context.Context, msg forwarder.Message) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.calls++
-	a.batches = append(a.batches, batch)
+	a.msgs = append(a.msgs, msg)
 	if a.fail != nil {
-		return a.fail(a.calls)
+		return a.fail(len(a.msgs))
 	}
 	return nil
 }
 
-func (a *fakeAdapter) callCount() int {
+func (a *fakeAdapter) sent() []forwarder.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.calls
+	return append([]forwarder.Message(nil), a.msgs...)
 }
 
 func newTestLogger(t *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(testWriter{t}, nil))
 }
 
-func TestForwarderSendsPendingRowsAndMarksSent(t *testing.T) {
-	ctx := context.Background()
-	repo := openTestRepo(t)
-	v := 1.0
-	e, err := repo.Insert(ctx, queue.Entry{GatewayID: "GW001", DeviceID: 1, DatapointID: 1, Value: &v, Quality: "GOOD", EventTimestamp: time.Now()})
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
+func TestForwarderSendsPendingChunksAndAcksThem(t *testing.T) {
+	q := openTestQueue(t)
+	fill(t, q, 3, 5)
 
 	adapter := &fakeAdapter{}
-	fwd := forwarder.New(repo, adapter, forwarder.Config{BatchSize: 10, PollInterval: 10 * time.Millisecond}, newTestLogger(t))
-
-	runCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	fwd := forwarder.New(q, adapter, forwarder.Config{GatewayID: "GW001", MaxReadingsPerMessage: 1000, PollInterval: 10 * time.Millisecond}, newTestLogger(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	fwd.Run(runCtx)
+	fwd.Run(ctx)
 
-	if adapter.callCount() == 0 {
-		t.Fatal("expected adapter.Send to be called at least once")
+	msgs := adapter.sent()
+	if len(msgs) != 1 {
+		t.Fatalf("sent %d messages, want 1 carrying all 3 chunks", len(msgs))
+	}
+	m := msgs[0]
+	if m.GatewayID != "GW001" || m.StreamID != q.StreamID() || len(m.Chunks) != 3 || m.ReadingCount() != 15 {
+		t.Fatalf("message = %+v", m)
+	}
+	if m.FromSeq != m.Chunks[0].Seq || m.ToSeq != m.Chunks[2].Seq || m.FromSeq >= m.ToSeq {
+		t.Errorf("seq range %d-%d does not match chunks", m.FromSeq, m.ToSeq)
+	}
+	if st := q.Stats(); st.PendingChunks != 0 {
+		t.Errorf("PendingChunks = %d after ack, want 0", st.PendingChunks)
 	}
 	if !fwd.Status().Connected {
-		t.Error("expected forwarder status to report Connected after a successful send")
-	}
-
-	stats, err := repo.Stats(ctx)
-	if err != nil {
-		t.Fatalf("Stats: %v", err)
-	}
-	if stats.PendingCount != 0 {
-		t.Errorf("PendingCount = %d, want 0 (row should be SENT)", stats.PendingCount)
-	}
-	_ = e
-}
-
-func TestForwarderRetriesAfterFailureAndEventuallySucceeds(t *testing.T) {
-	ctx := context.Background()
-	repo := openTestRepo(t)
-	v := 1.0
-	if _, err := repo.Insert(ctx, queue.Entry{GatewayID: "GW001", DeviceID: 1, DatapointID: 1, Value: &v, Quality: "GOOD", EventTimestamp: time.Now()}); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-
-	adapter := &fakeAdapter{
-		fail: func(callNum int) error {
-			if callNum == 1 {
-				return errors.New("simulated server down")
-			}
-			return nil
-		},
-	}
-	// PollInterval > 1s backoff so the second attempt only happens once the
-	// backoff window has elapsed, proving MarkFailed's scheduling is honored
-	// end-to-end (not just that the row eventually gets retried).
-	fwd := forwarder.New(repo, adapter, forwarder.Config{BatchSize: 10, PollInterval: 200 * time.Millisecond}, newTestLogger(t))
-
-	runCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
-	defer cancel()
-	fwd.Run(runCtx)
-
-	if adapter.callCount() < 2 {
-		t.Fatalf("expected at least 2 send attempts, got %d", adapter.callCount())
-	}
-
-	stats, err := repo.Stats(ctx)
-	if err != nil {
-		t.Fatalf("Stats: %v", err)
-	}
-	if stats.PendingCount != 0 {
-		t.Errorf("PendingCount = %d, want 0 (row should have eventually been SENT)", stats.PendingCount)
-	}
-
-	st := fwd.Status()
-	if !st.Connected {
-		t.Error("expected final status to be Connected after the retry succeeded")
+		t.Error("expected Connected after a successful send")
 	}
 }
 
-func TestForwarderRecoversRowsStuckInSendingOnStartup(t *testing.T) {
-	ctx := context.Background()
-	repo := openTestRepo(t)
-	v := 1.0
-	e, err := repo.Insert(ctx, queue.Entry{GatewayID: "GW001", DeviceID: 1, DatapointID: 1, Value: &v, Quality: "GOOD", EventTimestamp: time.Now()})
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-
-	// Simulate the previous process crashing mid-send.
-	if _, err := repo.FetchBatch(ctx, 10); err != nil { // marks it SENDING
-		t.Fatalf("FetchBatch: %v", err)
-	}
+func TestForwarderSplitsBacklogIntoMessagesInSeqOrder(t *testing.T) {
+	q := openTestQueue(t)
+	fill(t, q, 10, 4) // 40 readings, 4 per chunk
 
 	adapter := &fakeAdapter{}
-	fwd := forwarder.New(repo, adapter, forwarder.Config{BatchSize: 10, PollInterval: 10 * time.Millisecond}, newTestLogger(t))
-
-	runCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	fwd := forwarder.New(q, adapter, forwarder.Config{GatewayID: "GW001", MaxReadingsPerMessage: 8, PollInterval: 10 * time.Millisecond}, newTestLogger(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	fwd.Run(runCtx)
+	fwd.Run(ctx)
 
-	if adapter.callCount() == 0 {
-		t.Fatal("expected the recovered row to be re-sent, but adapter.Send was never called")
+	msgs := adapter.sent()
+	if len(msgs) != 5 {
+		t.Fatalf("sent %d messages, want 5 of 2 chunks each", len(msgs))
 	}
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i].FromSeq <= msgs[i-1].ToSeq {
+			t.Errorf("message %d starts at %d, not after %d", i, msgs[i].FromSeq, msgs[i-1].ToSeq)
+		}
+	}
+	if st := q.Stats(); st.PendingReadings != 0 {
+		t.Errorf("PendingReadings = %d, want 0", st.PendingReadings)
+	}
+}
 
-	stats, err := repo.Stats(ctx)
-	if err != nil {
-		t.Fatalf("Stats: %v", err)
+func TestForwarderResendsSameDataAfterFailure(t *testing.T) {
+	q := openTestQueue(t)
+	fill(t, q, 1, 3)
+
+	adapter := &fakeAdapter{fail: func(n int) error {
+		if n == 1 {
+			return errors.New("simulated server down")
+		}
+		return nil
+	}}
+	fwd := forwarder.New(q, adapter, forwarder.Config{GatewayID: "GW001", PollInterval: 10 * time.Millisecond}, newTestLogger(t))
+	// first backoff is 1s
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	fwd.Run(ctx)
+
+	msgs := adapter.sent()
+	if len(msgs) != 2 {
+		t.Fatalf("sent %d messages, want 2 (fail, then retry after backoff)", len(msgs))
 	}
-	if stats.PendingCount != 0 || stats.SendingCount != 0 {
-		t.Errorf("expected the recovered row to end up SENT, got pending=%d sending=%d", stats.PendingCount, stats.SendingCount)
+	if msgs[0].FromSeq != msgs[1].FromSeq || msgs[0].ToSeq != msgs[1].ToSeq {
+		t.Errorf("retry sent %d-%d, want the same %d-%d", msgs[1].FromSeq, msgs[1].ToSeq, msgs[0].FromSeq, msgs[0].ToSeq)
 	}
-	_ = e
+	if st := q.Stats(); st.PendingChunks != 0 {
+		t.Errorf("PendingChunks = %d, want 0 after the retry succeeded", st.PendingChunks)
+	}
+	if !fwd.Status().Connected {
+		t.Error("expected Connected after the retry succeeded")
+	}
+}
+
+func TestForwarderKeepsDataWhenServerNeverAcks(t *testing.T) {
+	q := openTestQueue(t)
+	fill(t, q, 2, 3)
+
+	adapter := &fakeAdapter{fail: func(int) error { return errors.New("down") }}
+	fwd := forwarder.New(q, adapter, forwarder.Config{GatewayID: "GW001", PollInterval: 10 * time.Millisecond}, newTestLogger(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	fwd.Run(ctx)
+
+	if st := q.Stats(); st.PendingChunks != 2 || st.PendingReadings != 6 {
+		t.Errorf("stats = %+v, want all data still pending", st)
+	}
+	if fwd.Status().Connected {
+		t.Error("expected not Connected")
+	}
 }
 
 func TestForwarderDoesNotCallAdapterWhenQueueIsEmpty(t *testing.T) {
-	ctx := context.Background()
-	repo := openTestRepo(t)
-
+	q := openTestQueue(t)
 	adapter := &fakeAdapter{}
-	fwd := forwarder.New(repo, adapter, forwarder.Config{BatchSize: 10, PollInterval: 10 * time.Millisecond}, newTestLogger(t))
-
-	runCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	fwd := forwarder.New(q, adapter, forwarder.Config{GatewayID: "GW001", PollInterval: 10 * time.Millisecond}, newTestLogger(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	fwd.Run(runCtx)
+	fwd.Run(ctx)
 
-	if adapter.callCount() != 0 {
-		t.Errorf("expected 0 calls with an empty queue, got %d", adapter.callCount())
+	if n := len(adapter.sent()); n != 0 {
+		t.Errorf("expected 0 sends with an empty queue, got %d", n)
 	}
 }

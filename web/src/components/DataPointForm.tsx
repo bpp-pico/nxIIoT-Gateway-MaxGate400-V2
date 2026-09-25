@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { DataPoint, DataType, Priority } from '../types'
+import type { DataPoint, DataType } from '../types'
 import { styles } from '../styles'
 
 interface DataPointFormProps {
@@ -18,7 +18,6 @@ const emptyForm = {
   scale: 1,
   offset: 0,
   unit: '',
-  priority: 'NORMAL' as Priority,
   enabled: true,
 }
 
@@ -143,15 +142,6 @@ export function DataPointForm({ initial, onSubmit, onCancel }: DataPointFormProp
         <div style={{ ...styles.formRow, flex: 1 }}>
           <label style={styles.label}>Unit</label>
           <input style={styles.input} value={form.unit} onChange={(e) => set('unit', e.target.value)} />
-        </div>
-        <div style={{ ...styles.formRow, flex: 1 }}>
-          <label style={styles.label}>Priority</label>
-          <select style={styles.input} value={form.priority} onChange={(e) => set('priority', e.target.value as Priority)}>
-            <option value="CRITICAL">Critical</option>
-            <option value="HIGH">High</option>
-            <option value="NORMAL">Normal</option>
-            <option value="LOW">Low</option>
-          </select>
         </div>
       </div>
 
