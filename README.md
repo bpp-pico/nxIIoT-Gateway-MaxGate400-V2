@@ -1,5 +1,7 @@
 # nxIIoT Gateway
 
+> **V2 fork** of `nxIIoT-Gateway-MaxGate400` (V1), forked at commit `58cde8d`. Everything below still describes V1 until V2's scope is defined — see the note at the top of [spec.md](spec.md).
+
 Industrial IoT Gateway for Modbus RTU/TCP acquisition, local store & forward, and MQTT delivery to a downstream server. This repo is the gateway component only (Go backend) — split out from the original monorepo for deployment to a maisvch MaxGate400 device. See [industrial_iot_gateway_handoff_dev_plan.md](industrial_iot_gateway_handoff_dev_plan.md) if present in your checkout for the full design and phased development plan, and [HANDOFF.md](HANDOFF.md) for the current orientation snapshot (architecture decisions, known gaps, what's next).
 
 ## Stack

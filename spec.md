@@ -1,5 +1,7 @@
 # nxIIoT Gateway — gateway component (split for maisvch MaxGate400)
 
+> **V2 fork.** This repo is a separate copy of `nxIIoT-Gateway-MaxGate400` (V1), forked at commit `58cde8d` with full git history kept. It has **no remote yet** and is not linked to V1's GitHub repo. Everything below this note — the architecture, the "Done" entries and every MaxGate400 device/incident/deploy record — describes **V1 as of `58cde8d`**; the live MaxGate400 device history belongs to V1's repo, not to this one. V2's goals and scope are **not defined yet**: record them here, starting below, before changing code. The Go module path is still `nxiiot-gateway` (unchanged from V1).
+
 Modbus RTU/TCP acquisition → local SQLite store & forward → MQTT delivery to a downstream server. This repo was split from the original nxIIoT Gateway monorepo to deploy the gateway component onto a maisvch MaxGate400 device. For the deep architecture rationale and bug history, see [HANDOFF.md](HANDOFF.md). For the wire contract the downstream "Internal Server" team needs to implement (topics, ack, dedup, retry), see [Server_Design_Spec.md](Server_Design_Spec.md).
 
 ## Architecture
