@@ -6,19 +6,30 @@ Modbus RTU/TCP acquisition → local SQLite store & forward → MQTT delivery to
 
 ## V2 scope (in progress — defined 2026-09-25)
 
-Goal: **redesign Store & Forward** (the `data_queue` table, `internal/queue`, `internal/forwarder`). The current design is described under Architecture below and in HANDOFF.md.
+Goal: **redesign Store & Forward** (the `data_queue` table, `internal/queue`, `internal/forwarder`). The current (V1) design is described under Architecture below and in HANDOFF.md.
 
-Decisions so far (user, 2026-09-25):
-- **The wire contract may change.** The MQTT/HTTP payload, ack format and `sequence_id` scheme in [Server_Design_Spec.md](Server_Design_Spec.md) are no longer fixed. Whatever V2 picks has to be rewritten into that doc for the backend team.
-- **Drop data priority.** No `CRITICAL`/`HIGH`/`NORMAL`/`LOW` tiers, and no "CRITICAL is never evicted" rule. This affects `data_queue.priority`, `datapoint.priority` and the UI field, priority-ordered `FetchBatch`, per-tier `EvictOldestNonCritical`, `migrations/0007`'s index, and `priority` in the wire entry.
+### Decisions (user, 2026-09-25)
+- **The wire contract may change.** The MQTT/HTTP payload, ack format and `sequence_id` scheme in [Server_Design_Spec.md](Server_Design_Spec.md) are no longer fixed; V2's contract must be rewritten into that doc for the backend team.
+- **Drop data priority.** No `CRITICAL`/`HIGH`/`NORMAL`/`LOW` tiers and no "CRITICAL is never evicted" rule. Touches `data_queue.priority`, `datapoint.priority` + its UI field, priority-ordered `FetchBatch`, per-tier `EvictOldestNonCritical`, `migrations/0007`'s index, and `priority` in the wire entry.
+- **Outage coverage: as long as possible.** Minimise bytes per reading; cap the buffer in bytes, not rows (`max_rows` bounded rows, not file size — MEMORY.md 2026-09-11).
+- **Send every reading, system-wide.** No report-by-exception / deadband / heartbeat. (An earlier answer the same day chose "only changed values"; reversed after the benchmark below showed option B alone gives ~4 months of buffer.)
+- **Storage layout: option B** — one SQLite row per chunk of compressed readings.
+- **Chunk interval: 2 s to start** — up to ~2 s of not-yet-written readings may be lost on power failure.
 
-- **Outage coverage: as long as possible.** The buffer should hold as many hours/days of undelivered data as `/userdata` (1.6 GB) allows, so storage per reading must be minimised and the cap should be in bytes, not rows (`max_rows` bounded rows, not file size — see MEMORY.md 2026-09-11).
-- **Store only changed values** (report-by-exception) instead of every poll result.
+### Benchmark behind the choice (2026-09-25)
+Python `sqlite3` on the dev machine, 500k synthetic readings shaped like the device's 14 tags, every reading stored: current `data_queue` **314 B/reading** (matches the device: 638 MB held ~2M rows); A, one compact row per reading, no secondary index, **24 B**; B, one row per ~2 s chunk of zlib-compressed binary records, **9.3 B**. At 12.5 readings/s with ~1.2 GB usable: **~3.5 / 46 / 120 days**. Synthetic values, so B's ratio on real data is unverified. Reading the device's real `data_queue` was blocked by the auto-mode classifier ("Production Reads"); not done.
 
-Local storage benchmark (2026-09-25, Python `sqlite3` on the dev machine, 500k synthetic readings shaped like the device's 14 tags, every reading stored, no report-by-exception): current `data_queue` schema **314 B/reading** (matches the device: 638 MB held ~2M rows); option A, one compact row per reading with no secondary index, **24 B**; option B, one row per ~2s chunk of zlib-compressed binary records, **9.3 B**. At 12.5 readings/s with ~1.2 GB usable that is about **3.5 / 46 / 120 days** of buffer. Synthetic values, so B's compression ratio on real data is unverified. Reading the device's real `data_queue` to measure change rate was blocked by the auto-mode classifier ("Production Reads"); not done.
+### Proposed design (not approved yet — no code changed)
+1. **Separate file `data/queue.db`**, not a table in `gateway.db`, so a full or damaged queue can't take config down with it (2026-09-11). Created with `auto_vacuum=INCREMENTAL` so deleted space goes back to the OS (`PRAGMA incremental_vacuum`); periodic `wal_checkpoint(TRUNCATE)` bounds the WAL.
+2. **Schema**: `chunk(seq INTEGER PRIMARY KEY AUTOINCREMENT, first_ts, last_ts, n, data BLOB)` + `meta(key, value)` holding `acked_seq`. No status column, no secondary index. `AUTOINCREMENT` keeps `seq` monotonic across restarts and after every row is deleted.
+3. **Write path**: `Processor` appends readings to an in-memory encoder; every 2 s one `INSERT` of a deflate-compressed, versioned binary record list (`datapoint_id`, `device_id`, ts delta, quality, value/null). If the insert fails, the chunk stays in memory and is retried next tick (bounded), instead of being dropped as in V1.
+4. **Capacity**: `queue.max_bytes` (replaces `max_rows`/`evict_batch_size`/`max_rows_sweep_interval_seconds`) plus a minimum-free-space floor on `/userdata`; when either is hit, `DELETE FROM chunk WHERE seq <= ?` on the oldest range — acked or not — then `incremental_vacuum`. Size from `page_count`/`freelist_count`, no table scan. Evicted-but-unsent readings are counted and exposed, not only logged.
+5. **Forward path**: no per-row status. Send chunks with `seq > acked_seq` in order, several in flight (window), one or more chunks per message during backlog; the server acks per message; the gateway advances `acked_seq` over the contiguous acked prefix and deletes acked chunks. Timeout → resend from the lowest unacked seq. Server de-dupes on `(gateway_id, seq)`.
+6. **Stats** from in-memory counters (initialised once at startup), so `/api/store-forward/status` does no table scan and `CountInsertedSince`/`cachedQueueStats` go away.
+7. **Old data**: a migration drops `data_queue` and priority columns from `gateway.db`; `VACUUM` once to return its ~638 MB on the device (deploy step, to be planned).
+8. Rewrite Server_Design_Spec.md; update the Store & Forward API, Dashboard and Settings UI.
 
-Still open: which storage design (options proposed in chat 2026-09-25, not chosen yet); deadband per datapoint; heartbeat/integrity interval; eviction when full (assumed: drop oldest). Tolerated loss on power failure was not stated — assumed ≤ ~1s of readings.
-No code changed yet.
+Still open: wire payload encoding (JSON vs the compressed binary chunk as-is); default `max_bytes`; window size.
 
 ## Architecture
 
