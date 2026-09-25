@@ -1,0 +1,95 @@
+# Local V2 test server: EMQX (MQTT broker) + server-sim (V2 wire contract,
+# dedupe + ack, status/config page) + InfluxDB 2 (storage) + Grafana
+# (dashboard). Dev/test only — see README.md here.
+#
+#   cd test-server && cp .env.example .env   # then set the secrets
+#   docker compose up -d --build
+name: nxiiot-test-server
+
+services:
+  emqx:
+    image: emqx/emqx:5.8.6
+    environment:
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?set in .env}
+    ports:
+      - "1883:1883"     # MQTT (gateways)
+      - "18083:18083"   # EMQX dashboard
+    volumes:
+      - emqx-data:/opt/emqx/data
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:2.7
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:?set in .env}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-nxiiot}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-gateway}
+      DOCKER_INFLUXDB_INIT_RETENTION: ${INFLUX_RETENTION:-30d}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:?set in .env}
+    ports:
+      - "8086:8086"     # InfluxDB UI + API
+    volumes:
+      - influx-data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  server-sim:
+    build:
+      context: ..
+      dockerfile: Dockerfile.server-sim
+    environment:
+      MQTT_BROKER_URL: tcp://emqx:1883
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_ORG: ${INFLUX_ORG:-nxiiot}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-gateway}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+      INFLUX_RETENTION_DAYS: ${INFLUX_RETENTION_DAYS:-30}
+      # Env above only seeds the first start; later edits on the page are kept here.
+      SETTINGS_PATH: /data/settings.json
+    ports:
+      - "9000:9000"     # status/config page, HTTP transport (/ingest), /received
+    volumes:
+      - server-data:/data
+    depends_on:
+      emqx: {condition: service_healthy}
+      influxdb: {condition: service_healthy}
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set in .env}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/nxiiot-gateway.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Read by provisioning/datasources/influxdb.yml
+      INFLUX_ORG: ${INFLUX_ORG:-nxiiot}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-gateway}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+    ports:
+      - "3000:3000"     # Grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      influxdb: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  emqx-data:
+  influx-data:
+  server-data:
+  grafana-data:

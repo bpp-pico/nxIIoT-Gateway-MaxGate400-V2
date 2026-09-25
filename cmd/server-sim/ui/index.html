@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nxIIoT Test Server</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1c2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #2563eb; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11151c; --panel: #19202a; --text: #e6e9ee; --muted: #93a0b2; --line: #2a3340;
+      --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --chip: #232c38;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 17px; margin: 0; }
+  header .links { margin-left: auto; display: flex; gap: 14px; }
+  a { color: var(--accent); }
+  nav { display: flex; gap: 4px; padding: 10px 20px 0; flex-wrap: wrap; }
+  nav button { border: 1px solid var(--line); border-bottom: none; background: transparent; color: var(--muted); padding: 8px 14px; border-radius: 8px 8px 0 0; cursor: pointer; font: inherit; }
+  nav button.active { background: var(--panel); color: var(--text); font-weight: 600; }
+  main { padding: 0 20px 40px; }
+  section { display: none; background: var(--panel); border: 1px solid var(--line); border-radius: 0 8px 8px 8px; padding: 18px; }
+  section.active { display: block; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  h3 { font-size: 14px; margin: 20px 0 8px; }
+  p.hint { color: var(--muted); margin: 0 0 14px; max-width: 70ch; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card .label { color: var(--muted); font-size: 12px; }
+  .card .value { font-size: 18px; font-weight: 600; margin-top: 2px; word-break: break-all; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: 12px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+  input[type=text], input[type=number], select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; }
+  input.wide { width: 100%; max-width: 420px; }
+  label.row { display: block; margin-bottom: 12px; }
+  label.row span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .radio { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; cursor: pointer; }
+  .radio small { display: block; color: var(--muted); }
+  button.primary, button.secondary { font: inherit; border-radius: 6px; padding: 7px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+  .msg { font-size: 13px; }
+  .banner { border: 1px solid var(--warn); color: var(--warn); border-radius: 8px; padding: 8px 12px; margin: 12px 20px 0; display: none; }
+  @media (max-width: 600px) { header, nav, main { padding-left: 16px; padding-right: 16px; } .banner { margin: 12px 16px 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>nxIIoT Test Server</h1>
+  <span id="conn" class="chip">…</span>
+  <div class="links"><a id="grafana" href="#" target="_blank" rel="noopener">Grafana</a><a id="influx" href="#" target="_blank" rel="noopener">InfluxDB</a><a id="emqx" href="#" target="_blank" rel="noopener">EMQX</a></div>
+</header>
+<div id="faultBanner" class="banner"></div>
+<nav>
+  <button data-tab="status" class="active">Status</button>
+  <button data-tab="faults">Fault Simulation</button>
+  <button data-tab="gateways">Gateways</button>
+  <button data-tab="datapoints">Datapoints</button>
+  <button data-tab="system">Broker &amp; Database</button>
+</nav>
+<main>
+  <section id="status" class="active">
+    <div class="cards" id="summary"></div>
+    <h2>Gateways</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Gateway</th><th>Registered</th><th>Last seen</th><th class="num">Messages</th><th class="num">Readings</th><th class="num">Duplicate chunks</th><th class="num">Gaps</th><th class="num">Missing chunks</th><th class="num">Rejected</th><th>Last seq</th><th>Last error</th></tr></thead>
+      <tbody id="gwBody"></tbody>
+    </table></div>
+    <h3>Recent gaps (data evicted on the gateway)</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Detected</th><th>Gateway</th><th>Stream</th><th>Missing seq</th><th class="num">Chunks</th></tr></thead>
+      <tbody id="gapBody"></tbody>
+    </table></div>
+    <p class="hint" style="margin-top:14px">Counters are kept in memory and start from zero when server-sim restarts. Stored readings are in InfluxDB.</p>
+  </section>
+
+  <section id="faults">
+    <h2>Fault simulation</h2>
+    <p class="hint">Makes the server misbehave on purpose, to check that the gateway keeps its data and resends it. Applies to both MQTT and HTTP, to every gateway, from the next message.</p>
+    <div id="faultModes"></div>
+    <label class="row"><span>Ack delay (ms). Data is stored first, then the ack waits this long. The gateway gives up after its ack_timeout_ms (10000 by default) and resends.</span>
+      <input type="number" id="ackDelay" min="0" max="120000" step="500"></label>
+    <div class="actions"><button class="primary" data-save="faults">Save</button><button class="secondary" id="faultReset">Back to normal</button><span class="msg" data-msg="faults"></span></div>
+  </section>
+
+  <section id="gateways">
+    <h2>Gateway registry</h2>
+    <p class="hint">Gateways known to this server, with a display name. Gateways that have sent data but are not registered appear in the Status tab.</p>
+    <label class="radio"><input type="checkbox" id="rejectUnknown"><div>Reject unregistered gateways<small>Their messages are acked with an error and not stored, so they keep the data queued.</small></div></label>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Gateway ID</th><th>Name</th><th></th></tr></thead>
+      <tbody id="regBody"></tbody>
+    </table></div>
+    <div class="actions"><button class="secondary" id="addGw">Add gateway</button><button class="secondary" id="addSeen">Add all seen gateways</button></div>
+    <div class="actions"><button class="primary" data-save="gateways">Save</button><span class="msg" data-msg="gateways"></span></div>
+  </section>
+
+  <section id="datapoints">
+    <h2>Datapoint names</h2>
+    <p class="hint">Name and unit per datapoint, used as the series label in Grafana. The list is every datapoint seen since server-sim started, plus every one already named. Clear both fields to remove a name.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Gateway</th><th class="num">Device</th><th class="num">Datapoint</th><th>Name</th><th>Unit</th><th class="num">Last value</th><th>Quality</th><th>Last reading</th></tr></thead>
+      <tbody id="dpBody"></tbody>
+    </table></div>
+    <div class="actions"><button class="primary" data-save="datapoints">Save</button><span class="msg" data-msg="datapoints"></span></div>
+  </section>
+
+  <section id="system">
+    <h2>MQTT</h2>
+    <label class="row"><span>Broker URL (empty turns the MQTT consumer off; HTTP /ingest still works)</span><input type="text" class="wide" id="brokerUrl" placeholder="tcp://emqx:1883"></label>
+    <label class="row"><span>Data topic filter (must end in /data; the ack goes to the same topic ending in /ack)</span><input type="text" class="wide" id="dataTopic" placeholder="gateway/+/data"></label>
+    <h2 style="margin-top:22px">InfluxDB</h2>
+    <p class="hint" id="influxInfo"></p>
+    <label class="row"><span>Bucket (created if it does not exist; the Grafana dashboard has a bucket selector)</span><input type="text" class="wide" id="bucket"></label>
+    <label class="row"><span>Retention (days, 0 = keep forever). Lowering it deletes older data from the bucket.</span><input type="number" id="retention" min="0" step="1"></label>
+    <div class="actions"><button class="primary" data-save="system">Save</button><span class="msg" data-msg="system"></span></div>
+  </section>
+</main>
+
+<script>
+const FAULTS = [
+  ["none", "Normal", "Store, then ack."],
+  ["drop_ack", "Lose the ack", "Store, but never ack. The gateway resends and the server must de-duplicate: watch Duplicate chunks."],
+  ["error_ack", "Reject", "Store nothing and ack with an error. The gateway keeps the data and resends with backoff."],
+  ["ignore", "Server down", "Store nothing and send no ack. The gateway times out and resends."],
+];
+let settings = null, status = null, regRows = [], dpEdits = {};
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ago = (t) => {
+  if (!t || t.startsWith("0001")) return '<span class="muted">never</span>';
+  const s = Math.round((Date.now() - new Date(t)) / 1000);
+  const txt = s < 60 ? s + "s ago" : s < 3600 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago";
+  return `<span class="${s < 30 ? "ok" : s < 300 ? "warn" : "bad"}" title="${esc(new Date(t).toLocaleString())}">${txt}</span>`;
+};
+const num = (n) => (n ?? 0).toLocaleString();
+const dpKey = (d) => `${d.gateway_id}|${d.device_id}|${d.datapoint_id}`;
+
+const host = location.hostname;
+$("grafana").href = `http://${host}:3000`;
+$("influx").href = `http://${host}:8086`;
+$("emqx").href = `http://${host}:18083`;
+
+document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("nav button, section").forEach((e) => e.classList.remove("active"));
+  b.classList.add("active");
+  $(b.dataset.tab).classList.add("active");
+  try { localStorage.setItem("tab", b.dataset.tab); } catch {}
+});
+try { const t = localStorage.getItem("tab"); if (t) document.querySelector(`nav button[data-tab="${t}"]`)?.click(); } catch {}
+
+async function api(method, path, body) {
+  const r = await fetch(path, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  if (!r.ok) throw new Error((await r.text()).trim() || r.statusText);
+  return r.json();
+}
+
+function renderStatus() {
+  const s = status;
+  const conn = $("conn");
+  conn.textContent = s.mqtt.broker_url ? (s.mqtt.connected ? "MQTT connected" : "MQTT disconnected") : "MQTT off";
+  conn.className = "chip " + (s.mqtt.connected ? "ok" : s.mqtt.broker_url ? "bad" : "muted");
+
+  const f = s.fault, banner = $("faultBanner");
+  if (f.mode !== "none" || f.ack_delay_ms > 0) {
+    const name = FAULTS.find((x) => x[0] === f.mode)?.[1] ?? f.mode;
+    banner.textContent = `Fault simulation is on: ${name}${f.ack_delay_ms ? `, ack delay ${f.ack_delay_ms} ms` : ""}.`;
+    banner.style.display = "block";
+  } else banner.style.display = "none";
+
+  const tot = s.gateways.reduce((a, g) => ({ r: a.r + g.readings, d: a.d + g.duplicate_chunks, g: a.g + g.gaps, x: a.x + g.rejected }), { r: 0, d: 0, g: 0, x: 0 });
+  const infl = s.influx.enabled ? (s.influx.last_error ? `<span class="bad">error</span>` : `<span class="ok">ok</span>`) : '<span class="muted">off</span>';
+  $("summary").innerHTML = [
+    ["Gateways", s.gateways.length], ["Readings stored", num(tot.r)], ["Duplicate chunks", num(tot.d)],
+    ["Gaps", num(tot.g)], ["Rejected messages", num(tot.x)], ["InfluxDB", infl],
+    ["Running since", esc(new Date(s.started_at).toLocaleString())],
+  ].map(([l, v]) => `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join("");
+  if (s.influx.last_error) $("summary").insertAdjacentHTML("beforeend", `<div class="card" style="grid-column:1/-1"><div class="label">InfluxDB last error</div><div class="bad">${esc(s.influx.last_error)}</div></div>`);
+
+  $("gwBody").innerHTML = s.gateways.length ? s.gateways.map((g) => {
+    const seqs = Object.entries(g.streams || {}).map(([k, v]) => `<span title="stream ${esc(k)}">${v}</span>`).join(", ") || '<span class="muted">-</span>';
+    return `<tr><td><b>${esc(g.id)}</b>${g.name ? `<div class="muted">${esc(g.name)}</div>` : ""}</td>
+      <td>${g.registered ? '<span class="ok">yes</span>' : '<span class="warn">no</span>'}</td>
+      <td>${ago(g.last_seen)}</td><td class="num">${num(g.messages)}</td><td class="num">${num(g.readings)}</td>
+      <td class="num">${num(g.duplicate_chunks)}</td><td class="num ${g.gaps ? "warn" : ""}">${num(g.gaps)}</td>
+      <td class="num">${num(g.missing_chunks)}</td><td class="num ${g.rejected ? "bad" : ""}">${num(g.rejected)}</td>
+      <td>${seqs}</td><td class="bad" style="white-space:normal">${esc(g.last_error)}</td></tr>`;
+  }).join("") : '<tr><td colspan="11" class="muted">No gateway has sent anything yet.</td></tr>';
+
+  $("gapBody").innerHTML = s.gaps.length ? s.gaps.map((g) => `<tr><td>${esc(new Date(g.at).toLocaleString())}</td><td>${esc(g.gateway_id)}</td>
+    <td class="muted">${esc(g.stream_id.slice(0, 8))}…</td><td>${g.from_seq}–${g.to_seq}</td><td class="num">${num(g.to_seq - g.from_seq + 1)}</td></tr>`).join("")
+    : '<tr><td colspan="5" class="muted">No gaps.</td></tr>';
+
+  $("influxInfo").textContent = s.influx.enabled ? `Server ${s.influx.url}, org ${s.influx.org}. The URL, org and token come from test-server/.env.` : "InfluxDB is off (INFLUX_URL not set). Readings are kept in memory only.";
+  renderDatapoints();
+}
+
+function renderDatapoints() {
+  const body = $("dpBody");
+  if (body.contains(document.activeElement)) return; // don't redraw under the cursor
+  const rows = status.datapoints;
+  body.innerHTML = rows.length ? rows.map((d) => {
+    const k = dpKey(d), e = dpEdits[k] ?? { name: d.name, unit: d.unit };
+    const v = d.last_value == null ? '<span class="muted">null</span>' : esc(d.last_value);
+    const q = d.last_quality ? `<span class="${d.last_quality === "GOOD" ? "ok" : "bad"}">${esc(d.last_quality)}</span>` : '<span class="muted">-</span>';
+    return `<tr><td>${esc(d.gateway_id)}</td><td class="num">${d.device_id}</td><td class="num">${d.datapoint_id}</td>
+      <td><input type="text" data-k="${esc(k)}" data-f="name" value="${esc(e.name)}" placeholder="e.g. Voltage L1"></td>
+      <td><input type="text" data-k="${esc(k)}" data-f="unit" value="${esc(e.unit)}" size="6" placeholder="V"></td>
+      <td class="num">${v}</td><td>${q}</td><td>${d.last_ts ? esc(new Date(d.last_ts).toLocaleString()) : '<span class="muted">not seen since start</span>'}</td></tr>`;
+  }).join("") : '<tr><td colspan="8" class="muted">No datapoints seen yet.</td></tr>';
+}
+$("dpBody").addEventListener("input", (ev) => {
+  const t = ev.target, k = t.dataset.k;
+  if (!k) return;
+  const d = status.datapoints.find((x) => dpKey(x) === k);
+  dpEdits[k] = dpEdits[k] ?? { name: d.name, unit: d.unit };
+  dpEdits[k][t.dataset.f] = t.value;
+});
+
+function renderSettings() {
+  const s = settings;
+  $("faultModes").innerHTML = FAULTS.map(([v, l, h]) => `<label class="radio"><input type="radio" name="fault" value="${v}" ${s.fault.mode === v ? "checked" : ""}><div><b>${l}</b><small>${h}</small></div></label>`).join("");
+  $("ackDelay").value = s.fault.ack_delay_ms;
+  $("rejectUnknown").checked = s.reject_unknown_gateways;
+  regRows = (s.gateways || []).map((g) => ({ ...g }));
+  renderRegistry();
+  $("brokerUrl").value = s.mqtt.broker_url;
+  $("dataTopic").value = s.mqtt.data_topic;
+  $("bucket").value = s.influx.bucket;
+  $("retention").value = s.influx.retention_days;
+}
+
+function renderRegistry() {
+  $("regBody").innerHTML = regRows.length ? regRows.map((g, i) => `<tr>
+    <td><input type="text" data-i="${i}" data-f="id" value="${esc(g.id)}" placeholder="GW001"></td>
+    <td><input type="text" data-i="${i}" data-f="name" value="${esc(g.name)}" placeholder="Plant A line 1" class="wide"></td>
+    <td><button class="secondary" data-del="${i}">Remove</button></td></tr>`).join("")
+    : '<tr><td colspan="3" class="muted">No gateways registered.</td></tr>';
+}
+$("regBody").addEventListener("input", (ev) => { const t = ev.target; if (t.dataset.i) regRows[t.dataset.i][t.dataset.f] = t.value; });
+$("regBody").addEventListener("click", (ev) => { const i = ev.target.dataset.del; if (i !== undefined) { regRows.splice(+i, 1); renderRegistry(); } });
+$("addGw").onclick = () => { regRows.push({ id: "", name: "" }); renderRegistry(); };
+$("addSeen").onclick = () => {
+  for (const g of status?.gateways ?? []) if (!regRows.some((r) => r.id === g.id)) regRows.push({ id: g.id, name: g.name || "" });
+  renderRegistry();
+};
+$("faultReset").onclick = () => { document.querySelector('input[name=fault][value=none]').checked = true; $("ackDelay").value = 0; save("faults"); };
+
+function collect(section) {
+  const s = structuredClone(settings);
+  if (section === "faults") {
+    s.fault = { mode: document.querySelector("input[name=fault]:checked")?.value ?? "none", ack_delay_ms: +$("ackDelay").value || 0 };
+  } else if (section === "gateways") {
+    s.reject_unknown_gateways = $("rejectUnknown").checked;
+    s.gateways = regRows.filter((g) => g.id.trim() || g.name.trim());
+  } else if (section === "datapoints") {
+    const byKey = new Map((s.datapoints || []).map((d) => [dpKey(d), d]));
+    for (const [k, e] of Object.entries(dpEdits)) {
+      const [gateway_id, device_id, datapoint_id] = k.split("|");
+      byKey.set(k, { gateway_id, device_id: +device_id, datapoint_id: +datapoint_id, name: e.name, unit: e.unit });
+    }
+    s.datapoints = [...byKey.values()];
+  } else if (section === "system") {
+    s.mqtt = { broker_url: $("brokerUrl").value, data_topic: $("dataTopic").value };
+    s.influx = { bucket: $("bucket").value, retention_days: +$("retention").value || 0 };
+  }
+  return s;
+}
+
+async function save(section) {
+  const msg = document.querySelector(`[data-msg="${section}"]`);
+  msg.className = "msg muted"; msg.textContent = "Saving…";
+  try {
+    settings = await api("PUT", "/api/settings", collect(section));
+    if (section === "datapoints") dpEdits = {};
+    renderSettings();
+    msg.className = "msg ok"; msg.textContent = "Saved.";
+    await refresh();
+  } catch (e) {
+    msg.className = "msg bad"; msg.textContent = e.message;
+  }
+}
+document.querySelectorAll("[data-save]").forEach((b) => b.onclick = () => save(b.dataset.save));
+
+async function refresh() {
+  try { status = await api("GET", "/api/status"); renderStatus(); }
+  catch (e) { $("conn").textContent = "server-sim unreachable"; $("conn").className = "chip bad"; }
+}
+(async () => {
+  try { settings = await api("GET", "/api/settings"); renderSettings(); } catch (e) { alert("Could not load settings: " + e.message); }
+  await refresh();
+  setInterval(refresh, 3000);
+})();
+</script>
+</body>
+</html>

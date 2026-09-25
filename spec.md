@@ -37,10 +37,38 @@ Wire encoding **JSON** and default `max_bytes` **1 GiB** chosen by the user; imp
 - `go build ./...`, `go vet ./...`, `go test ./...` all pass. New tests: `internal/queue/store_test.go` (codec round trip incl. null/unknown quality/out-of-order timestamps and corrupt blobs; append/flush/read/ack counters; reopen keeps counters and `stream_id` and never reuses `seq`; `auto_vacuum=2` and the file shrinks after ack; eviction over `max_bytes` keeps the newest; eviction below the free-space floor; flush failure keeps readings in memory up to the cap; corrupt chunk discarded), `internal/forwarder/forwarder_test.go` (ack deletes, backlog split into ordered messages, same data resent after failure, data kept while the server is down), MQTT adapter tests against an embedded broker with the new message/ack, `internal/storage/migration_0008_test.go` (0008 on a seeded V1-shaped DB).
 - `web`: `npm ci`, `npm run build` (tsc + vite) pass; `oxlint` shows no warnings in changed files (5 pre-existing warnings elsewhere).
 - **End-to-end on the dev machine** (built `gateway`, `modbus-sim`, `server-sim`; HTTP transport; 3 datapoints): migrations 0001–0008 applied to a fresh DB; readings reached server-sim with `seq` 1–13 contiguous and the queue emptied after each ack. Then server-sim was killed (outage): the queue grew to 11 chunks / 243 readings; the gateway was then **hard-killed** (`taskkill /F`, like a power cut) and restarted — the same `stream_id` and all 11 chunks / 243 readings were still there (the 15 readings still in memory were lost, as designed). server-sim restarted: the backlog arrived as one message `seq 14-31` (399 readings) then `32`, contiguous with the 13 before the outage, no gaps, no duplicates. Compression on the simulator's constant values was ~2.5 B/reading.
-- **Not verified**: the MQTT transport end-to-end outside unit tests; the web pages in a real browser (build and types only); behaviour on the ARM device and its SD card; eviction and `incremental_vacuum` timing at GB scale; compression ratio on real sensor data.
+- **MQTT end-to-end on the dev machine (2026-09-25)**, against the Docker test server (`test-server/`: EMQX 5.8.6 + server-sim + InfluxDB 2.7): gateway V2 (`transport: mqtt`, `tcp://localhost:1883`) + modbus-sim. Readings reached InfluxDB and the gateway queue emptied after each ack. **InfluxDB stopped ~30 s**: server-sim acked with `error`, the gateway kept 11 chunks / 243 readings; after restart they arrived as one message `seq 50-65` (351 readings). **EMQX stopped ~25 s**: `server_connected:false`, 14 chunks / 309 readings kept; the gateway's watchdog forced a reconnect after 49 s and the backlog arrived as `seq 72-103` (705 readings). Across the run every accepted range was contiguous (`seq 37-108`, 26 messages, 0 gaps, 0 duplicates).
+- **Not verified**: the web pages in a real browser (build and types only); behaviour on the ARM device and its SD card; eviction and `incremental_vacuum` timing at GB scale; compression ratio on real sensor data.
 
 ### Deploying V2 to the MaxGate400 (not done — needs planning with the user)
 This is a breaking change for the backend: the server must speak the V2 contract (Server_Design_Spec.md §11) before a V2 gateway is pointed at it with `transport: mqtt`. The upgrade will need: drain the V1 queue first (`pending_records` 0) or accept losing it; copy `migrations/0008_*.sql` into the device's migrations directory (MEMORY.md: swapping the binary does not copy migrations); edit `config.yaml` (the `queue:` / `forwarder:` keys above — `max_bytes` 1 GiB only fits `/userdata` once V1's 638 MB `gateway.db` has been VACUUMed, which 0008 cannot do); `VACUUM gateway.db` once after 0008 with the service stopped; then re-check `df -h /userdata`. The device's 4 connections were still `enabled: false` as of 2026-09-25.
+
+### Test server (Docker Desktop, `test-server/`)
+Decided 2026-09-25: the backend stand-in for V2 testing runs on the dev PC under Docker Desktop — EMQX (broker) + `cmd/server-sim` + InfluxDB 2 (storage), `test-server/compose.yml`, secrets in the git-ignored `test-server/.env`. server-sim now writes new chunks to InfluxDB (`cmd/server-sim/influx.go`, line protocol over HTTP, no new Go dependency) and acks only after that write succeeds; on failure it acks with `error` (MQTT) or returns 503 (HTTP). It is the source for the gateway on this PC first, the MaxGate400 later (needs V2 deployed on the device, Windows Firewall TCP 1883, and a decision about exposing anonymous EMQX on that network). Usage: [test-server/README.md](test-server/README.md).
+
+**Dashboard + config page (added 2026-09-25, user's choice: Grafana for the dashboard; the config page covers fault simulation, gateway registry, datapoint names, broker/DB settings).**
+- **Grafana 11.5.2** was added to the compose file. Its datasource and the dashboard "nxIIoT Gateway data" are provisioned from `test-server/grafana/`.
+- **Dashboard panels:**
+  - totals, missing chunks and not-GOOD count;
+  - values labelled by datapoint name, readings per minute, and quality;
+  - the latest value per datapoint, gaps, and not-GOOD readings.
+- **server-sim page** at `/` (`cmd/server-sim/ui/index.html`, embedded; `settings.go`, `server.go`, `store.go`, `mqtt.go`):
+  - a Status tab with per-gateway counters;
+  - fault modes `drop_ack` / `error_ack` / `ignore` plus an ack delay;
+  - the registry, with an option to reject unregistered gateways;
+  - datapoint names, written to InfluxDB as `datapoint_meta`;
+  - MQTT broker/topic (applied live), and InfluxDB bucket (created if missing) and retention.
+- **Where settings live:** the page saves them to `/data/settings.json` on a volume.
+- **API:** `GET /api/status`, `GET`/`PUT /api/settings`.
+- **Verified on the dev PC, with the live gateway V2 over MQTT:**
+  - every panel query returns data through Grafana's `/api/ds/query`, and the Values series carry the names set on the page;
+  - `drop_ack` for 25 s gave 19 duplicate chunks and 0 gaps;
+  - `error_ack` and `ignore` made the gateway queue grow (8, then 16 chunks), and it drained after returning to normal;
+  - an unregistered gateway was rejected with "gateway not registered", and its data was kept and delivered once registered;
+  - invalid settings return 400;
+  - settings survive a container restart;
+  - switching the bucket created it with the retention given and data flowed into it. This first failed: InfluxDB answers 404, not an empty list, for a missing bucket. That was fixed and covered by a test.
+  - the page renders with live data in headless Edge (Status tab). The other tabs and the Grafana UI itself were not looked at in a browser.
 
 ### Still open
 - Real-data compression ratio, and the backend team's readiness for the V2 contract.
