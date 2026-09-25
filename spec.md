@@ -4,6 +4,17 @@
 
 Modbus RTU/TCP acquisition → local SQLite store & forward → MQTT delivery to a downstream server. This repo was split from the original nxIIoT Gateway monorepo to deploy the gateway component onto a maisvch MaxGate400 device. For the deep architecture rationale and bug history, see [HANDOFF.md](HANDOFF.md). For the wire contract the downstream "Internal Server" team needs to implement (topics, ack, dedup, retry), see [Server_Design_Spec.md](Server_Design_Spec.md).
 
+## V2 scope (in progress — defined 2026-09-25)
+
+Goal: **redesign Store & Forward** (the `data_queue` table, `internal/queue`, `internal/forwarder`). The current design is described under Architecture below and in HANDOFF.md.
+
+Decisions so far (user, 2026-09-25):
+- **The wire contract may change.** The MQTT/HTTP payload, ack format and `sequence_id` scheme in [Server_Design_Spec.md](Server_Design_Spec.md) are no longer fixed. Whatever V2 picks has to be rewritten into that doc for the backend team.
+- **Drop data priority.** No `CRITICAL`/`HIGH`/`NORMAL`/`LOW` tiers, and no "CRITICAL is never evicted" rule. This affects `data_queue.priority`, `datapoint.priority` and the UI field, priority-ordered `FetchBatch`, per-tier `EvictOldestNonCritical`, `migrations/0007`'s index, and `priority` in the wire entry.
+
+Still open, needed before design: how much data loss is acceptable and how long an outage the buffer must cover; whether every reading must be stored or only changes (deadband / report-by-exception) or one row per poll cycle.
+No code changed yet.
+
 ## Architecture
 
 - **Acquisition** (`internal/acquisition`) — Modbus config is split into `connection` (the physical link — protocol/interface-or-ip+port/baud/parity/timeout/retry/`next_device_delay_ms`, `internal/connection`) and `device` (a slave ID + its data points, referencing one `connection_id`, `internal/device`) — several devices can share one physical RTU bus (real multi-drop). Polls one goroutine **per enabled connection**, not per device: `Poller.runConnection` owns a single `modbus.Client` for the connection's lifetime and calls `SetUnitID` before each sibling device's own reads, serialized by construction. Devices are scanned continuously, round-robin, paced only by `next_device_delay_ms` between devices; each device's datapoints are batched into as few Modbus block reads as possible (`internal/acquisition/blockplan.go`) instead of one request per datapoint.
